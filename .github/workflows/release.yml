@@ -1,0 +1,27 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  cli:
+    name: Build universal CLI
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build
+        working-directory: cli
+        run: |
+          swift build -c release --arch arm64 --arch x86_64
+          mkdir -p dist
+          cp .build/apple/Products/Release/downbeat dist/downbeat
+          tar -czf downbeat-macos-universal.tar.gz -C dist downbeat
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: cli/downbeat-macos-universal.tar.gz
+          body_path: CHANGELOG.md
+          draft: false
