@@ -545,7 +545,9 @@ export class LivePlayer {
     this.resyncs = 0;
 
     if (!this.moduleLoaded) {
-      await this.ctx.audioWorklet.addModule("/live-processor.js");
+      // Fingerprinted so a cached copy from an earlier deploy can never be
+      // used against newer application code.
+      await this.ctx.audioWorklet.addModule(`/live-processor.js?v=${__WORKLET_VERSION__}`);
       this.moduleLoaded = true;
     }
 

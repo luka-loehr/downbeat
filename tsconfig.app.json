@@ -15,5 +15,5 @@
     "verbatimModuleSyntax": true,
     "types": ["vite/client"]
   },
-  "include": ["src/ui", "src/audio", "src/shared", "tests"]
+  "include": ["src/ui", "src/audio", "src/shared", "tests", "src/ui/vite-env.d.ts"]
 }
