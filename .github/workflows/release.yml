@@ -9,19 +9,68 @@ permissions:
 
 jobs:
   cli:
-    name: Build universal CLI
+    name: Build macOS package
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
-      - name: Build
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Build the capture engine (universal)
         working-directory: cli
+        run: swift build -c release --arch arm64 --arch x86_64
+
+      - name: Build the terminal UI
+        working-directory: tui
         run: |
-          swift build -c release --arch arm64 --arch x86_64
-          mkdir -p dist
-          cp .build/apple/Products/Release/downbeat dist/downbeat
-          tar -czf downbeat-macos-universal.tar.gz -C dist downbeat
+          npm ci --no-audit --no-fund
+          npm run build
+
+      # The product is two programs: a native engine that has to be Swift
+      # (Core Audio process taps) and an Ink UI that has to be Node. Ship both,
+      # plus the launcher that hides the split.
+      - name: Package
+        run: |
+          set -e
+          PKG=downbeat-macos-universal
+          mkdir -p "$PKG/lib"
+          cp cli/.build/apple/Products/Release/downbeat-core "$PKG/downbeat-core"
+          cp -R tui/dist "$PKG/lib/tui"
+          cp -R tui/node_modules "$PKG/lib/node_modules"
+          cp README.md LICENSE CHANGELOG.md "$PKG/"
+          cat > "$PKG/install.sh" <<'INNER'
+          #!/bin/sh
+          # Installs the two programs and a launcher that spawns one from the other.
+          set -e
+          HERE="$(cd "$(dirname "$0")" && pwd)"
+          PREFIX="${PREFIX:-$( [ -w /usr/local/bin ] && echo /usr/local/bin || echo "$HOME/.local/bin" )}"
+          LIB="${LIB:-$HOME/.local/share/downbeat}"
+          command -v node >/dev/null || { echo "downbeat needs Node (brew install node)"; exit 1; }
+          mkdir -p "$PREFIX" "$LIB"
+          install -m 755 "$HERE/downbeat-core" "$PREFIX/downbeat-core"
+          rm -rf "$LIB/tui" "$LIB/node_modules"
+          cp -R "$HERE/lib/tui" "$LIB/tui"
+          cp -R "$HERE/lib/node_modules" "$LIB/node_modules"
+          printf '#!/bin/sh\nexec node "%s/tui/cli.js" "$@"\n' "$LIB" > "$PREFIX/downbeat"
+          chmod 755 "$PREFIX/downbeat"
+          echo "Installed to $PREFIX. Next: downbeat login, then downbeat host"
+          INNER
+          chmod 755 "$PKG/install.sh"
+          tar -czf "$PKG.tar.gz" "$PKG"
+          shasum -a 256 "$PKG.tar.gz" > "$PKG.tar.gz.sha256"
+
+      - name: Verify the packaged engine runs
+        run: |
+          tar -xzf downbeat-macos-universal.tar.gz -C /tmp
+          /tmp/downbeat-macos-universal/downbeat-core --help | head -3
+          lipo -archs /tmp/downbeat-macos-universal/downbeat-core
+
       - uses: softprops/action-gh-release@v2
         with:
-          files: cli/downbeat-macos-universal.tar.gz
+          files: |
+            downbeat-macos-universal.tar.gz
+            downbeat-macos-universal.tar.gz.sha256
           body_path: CHANGELOG.md
           draft: false

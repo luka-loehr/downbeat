@@ -335,6 +335,8 @@ if let t = transport {
                    frameSize: encoder.framesPerPacket, bufferMs: options.bufferMs,
                    sourceLabel: options.sourceLabel)
 
+    // The encoder is owned solely by the thread below; nothing else touches it.
+    nonisolated(unsafe) let ownedEncoder = encoder
     let frameSize = encoder.framesPerPacket
     let buffer = options.bufferMs
     // The room clock corrects itself in steps of up to 4 ms. Reading it directly
@@ -356,7 +358,7 @@ if let t = transport {
                 Thread.sleep(forTimeInterval: 0.005); continue
             }
             ring.read(into: scratch, from: encoded, frames: frameSize)
-            let packets = (try? encoder.encode(scratch, frames: frameSize)) ?? []
+            let packets = (try? ownedEncoder.encode(scratch, frames: frameSize)) ?? []
             for packet in packets {
                 if !offsetPrimed { streamOffset = clock.offset; offsetPrimed = true }
                 let target = clock.offset

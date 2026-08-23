@@ -85,16 +85,23 @@ final class Transport: NSObject, @unchecked Sendable {
         if let sourceLabel { payload["sourceLabel"] = sourceLabel }
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
+        // A box rather than a captured `var`: the semaphore below does order
+        // the write before the read, but the compiler cannot see that, and a
+        // warning about concurrent mutation is not something to leave standing
+        // in a file that has already produced one real isolation crash.
+        final class Box: @unchecked Sendable {
+            var value: Result<(String, String), Error>?
+        }
+        let box = Box()
         let semaphore = DispatchSemaphore(value: 0)
-        var result: Result<(String, String), Error>?
         session.dataTask(with: request) { data, response, error in
             defer { semaphore.signal() }
-            if let error { result = .failure(error); return }
+            if let error { box.value = .failure(error); return }
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
             if status == 409 {
                 let obj = data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
-                result = .failure(TransportError.alreadyHosted(obj?["code"] as? String ?? "?"))
+                box.value = .failure(TransportError.alreadyHosted(obj?["code"] as? String ?? "?"))
                 return
             }
             guard status == 200,
@@ -103,15 +110,15 @@ final class Transport: NSObject, @unchecked Sendable {
                   let code = obj["code"] as? String,
                   let token = obj["hostToken"] as? String
             else {
-                result = .failure(status == 200 ? TransportError.badResponse
-                                                : TransportError.http(status, body))
+                box.value = .failure(status == 200 ? TransportError.badResponse
+                                                  : TransportError.http(status, body))
                 return
             }
-            result = .success((code, token))
+            box.value = .success((code, token))
         }.resume()
         semaphore.wait()
 
-        switch result {
+        switch box.value {
         case .success(let (code, token)): self.code = code; self.hostToken = token
         case .failure(let error): throw error
         case .none: throw TransportError.badResponse
