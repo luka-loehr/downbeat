@@ -54,15 +54,15 @@ export interface DeviceState {
  */
 export function deviceState(m: Member): DeviceState {
   if (m.startError !== null && Math.abs(m.startError) > 20)
-    return { glyph: G.warnMark, label: "Start " + m.startError.toFixed(0) + " ms", color: C.alarm, bad: true };
+    return { glyph: G.warnMark, label: "start " + m.startError.toFixed(0) + " ms", color: C.alarm, bad: true };
   if (m.rtt === 0 && m.sync === 0)
     return { glyph: G.idle, label: "verbindet", color: C.dim, bad: false };
   if (m.sync > 25 || m.rtt > 400)
-    return { glyph: G.warnMark, label: "Sync schlecht", color: C.alarm, bad: true };
+    return { glyph: G.warnMark, label: "sync poor", color: C.alarm, bad: true };
   if (m.sync > 12 || m.rtt > 200)
-    return { glyph: G.warnMark, label: "Sync schwach", color: C.warn, bad: true };
-  if (m.readyFor) return { glyph: G.locked, label: "geladen", color: C.lock, bad: false };
-  return { glyph: G.locked, label: "bereit", color: C.lock, bad: false };
+    return { glyph: G.warnMark, label: "sync weak", color: C.warn, bad: true };
+  if (m.readyFor) return { glyph: G.locked, label: "loaded", color: C.lock, bad: false };
+  return { glyph: G.locked, label: "ready", color: C.lock, bad: false };
 }
 
 /**
@@ -96,7 +96,7 @@ export function Devices({
 
   const header = (
     <Text wrap="truncate-end">
-      <Text color={C.dim}>{padEnd("GERÄT", nameW)} </Text>
+      <Text color={C.dim}>{padEnd("SPEAKER", nameW)} </Text>
       {tier >= 3 ? <Text color={C.dim}>{padEnd("ID", W_ID)} </Text> : null}
       {tier >= 2 ? <Text color={C.dim}>{padStart("RTT", W_RTT)} </Text> : null}
       {tier >= 1 ? <Text color={C.dim}>{padStart("SYNC", W_SYNC)} </Text> : null}

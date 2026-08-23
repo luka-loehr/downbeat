@@ -1,36 +1,127 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-label="Downbeat">
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="420" viewBox="0 0 1280 420" role="img" aria-label="Downbeat — one song, every phone, the same millisecond">
+  <title>Downbeat</title>
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#12101c"/>
-      <stop offset="55%" stop-color="#08070c"/>
-      <stop offset="100%" stop-color="#0d0a10"/>
+    <linearGradient id="sky" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0%" stop-color="#15121f"/>
+      <stop offset="45%" stop-color="#0b0910"/>
+      <stop offset="100%" stop-color="#07060a"/>
     </linearGradient>
-    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
-      <stop offset="0%" stop-color="#ff5f1f" stop-opacity="0.30"/>
+    <radialGradient id="halo" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="#ff5f1f" stop-opacity="0.34"/>
+      <stop offset="55%" stop-color="#ff5f1f" stop-opacity="0.07"/>
       <stop offset="100%" stop-color="#ff5f1f" stop-opacity="0"/>
     </radialGradient>
+    <linearGradient id="beam" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#3ef2a0" stop-opacity="0"/>
+      <stop offset="18%" stop-color="#3ef2a0" stop-opacity="0.55"/>
+      <stop offset="82%" stop-color="#3ef2a0" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#3ef2a0" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="fade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#ff5f1f" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#ff5f1f" stop-opacity="0.9"/>
+    </linearGradient>
+    <filter id="soft" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="9"/>
+    </filter>
   </defs>
-  <rect width="1200" height="300" fill="url(#bg)"/>
-  <circle cx="980" cy="150" r="190" fill="url(#glow)"/>
 
-  <!-- the downbeat: rings closing on one instant -->
-  <circle cx="980" cy="150" r="104" fill="none" stroke="#262433" stroke-width="1"/>
-  <circle cx="980" cy="150" r="78"  fill="none" stroke="#3a3550" stroke-width="1"/>
-  <circle cx="980" cy="150" r="52"  fill="none" stroke="#ff5f1f" stroke-width="2"/>
-  <circle cx="980" cy="150" r="7"   fill="#ff5f1f"/>
+  <rect width="1280" height="420" fill="url(#sky)"/>
 
-  <!-- four speakers, one line -->
-  <g fill="#3ef2a0">
-    <rect x="742" y="147" width="26" height="6" rx="3"/>
-    <rect x="784" y="147" width="26" height="6" rx="3"/>
-    <rect x="826" y="147" width="26" height="6" rx="3"/>
-    <rect x="868" y="147" width="26" height="6" rx="3"/>
+  <!-- faint studio grid -->
+  <g stroke="#ffffff" stroke-opacity="0.028">
+    <path d="M0 60h1280M0 120h1280M0 180h1280M0 240h1280M0 300h1280M0 360h1280"/>
+    <path d="M80 0v420M240 0v420M400 0v420M560 0v420M720 0v420M880 0v420M1040 0v420M1200 0v420"/>
   </g>
 
-  <text x="80" y="150" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
-        font-size="82" font-weight="800" letter-spacing="-3" fill="#f2efe9">DOWNBEAT</text>
-  <text x="84" y="196" font-family="Georgia, serif" font-style="italic"
-        font-size="30" fill="#ff5f1f">everybody on the one</text>
-  <text x="84" y="236" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
-        font-size="15" letter-spacing="2" fill="#8b879b">ONE SONG · EVERY PHONE · THE SAME MILLISECOND</text>
+  <circle cx="1010" cy="210" r="235" fill="url(#halo)"/>
+
+  <!-- ============ the downbeat: rings closing on one instant ============ -->
+  <g transform="translate(1010 210)">
+    <circle r="150" fill="none" stroke="#2a2740" stroke-width="1"/>
+    <circle r="118" fill="none" stroke="#39344f" stroke-width="1"/>
+    <circle r="86"  fill="none" stroke="#4a4463" stroke-width="1.5"/>
+    <circle r="86"  fill="none" stroke="#ff5f1f" stroke-width="3" filter="url(#soft)" opacity="0.75"/>
+    <circle r="86"  fill="none" stroke="#ff5f1f" stroke-width="2.5"
+            stroke-dasharray="405 135" stroke-linecap="round" transform="rotate(-90)"/>
+    <!-- tick marks: the graticule of a meter -->
+    <g stroke="#6b6485" stroke-width="1.5" stroke-linecap="round">
+      <path d="M0 -168V-156"/><path d="M0 168V156"/>
+      <path d="M-168 0H-156"/><path d="M168 0H156"/>
+    </g>
+    <circle r="9" fill="#ff5f1f"/>
+    <circle r="20" fill="none" stroke="#ff5f1f" stroke-width="1.5" opacity="0.5"/>
+  </g>
+
+  <!-- ============ four speakers, one line, one instant ============ -->
+  <g transform="translate(700 210)">
+    <rect x="0" y="-1" width="224" height="2" fill="url(#beam)"/>
+    <g fill="#3ef2a0">
+      <rect x="4"   y="-14" width="7" height="28" rx="3.5"/>
+      <rect x="60"  y="-14" width="7" height="28" rx="3.5"/>
+      <rect x="116" y="-14" width="7" height="28" rx="3.5"/>
+      <rect x="172" y="-14" width="7" height="28" rx="3.5"/>
+    </g>
+    <g fill="#3ef2a0" opacity="0.22">
+      <rect x="4"   y="-26" width="7" height="52" rx="3.5"/>
+      <rect x="60"  y="-26" width="7" height="52" rx="3.5"/>
+      <rect x="116" y="-26" width="7" height="52" rx="3.5"/>
+      <rect x="172" y="-26" width="7" height="52" rx="3.5"/>
+    </g>
+  </g>
+
+  <!-- ============ waveform running into the downbeat ============ -->
+  <g transform="translate(78 268)" fill="url(#fade)">
+    <rect x="0" y="-3" width="5" height="6" rx="2.5"/>
+    <rect x="15" y="-7" width="5" height="14" rx="2.5"/>
+    <rect x="30" y="-5" width="5" height="9" rx="2.5"/>
+    <rect x="45" y="-12" width="5" height="24" rx="2.5"/>
+    <rect x="60" y="-6" width="5" height="12" rx="2.5"/>
+    <rect x="75" y="-17" width="5" height="33" rx="2.5"/>
+    <rect x="90" y="-9" width="5" height="17" rx="2.5"/>
+    <rect x="105" y="-21" width="5" height="42" rx="2.5"/>
+    <rect x="120" y="-11" width="5" height="21" rx="2.5"/>
+    <rect x="135" y="-26" width="5" height="51" rx="2.5"/>
+    <rect x="150" y="-14" width="5" height="27" rx="2.5"/>
+    <rect x="165" y="-30" width="5" height="60" rx="2.5"/>
+    <rect x="180" y="-17" width="5" height="33" rx="2.5"/>
+    <rect x="195" y="-23" width="5" height="45" rx="2.5"/>
+    <rect x="210" y="-12" width="5" height="24" rx="2.5"/>
+    <rect x="225" y="-19" width="5" height="38" rx="2.5"/>
+    <rect x="240" y="-15" width="5" height="29" rx="2.5"/>
+    <rect x="255" y="-26" width="5" height="52" rx="2.5"/>
+    <rect x="270" y="-10" width="5" height="20" rx="2.5"/>
+    <rect x="285" y="-17" width="5" height="34" rx="2.5"/>
+  </g>
+
+  <!-- ============ wordmark ============ -->
+  <text x="78" y="150" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="96" font-weight="800" letter-spacing="-4.5" fill="#f2efe9">DOWNBEAT</text>
+  <text x="82" y="196" font-family="Georgia, Times New Roman, serif" font-style="italic"
+        font-size="31" fill="#ff5f1f">everybody on the one</text>
+
+  <text x="78" y="330" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="13.5" letter-spacing="2.4" fill="#8b879b">ONE SONG · EVERY PHONE · THE SAME MILLISECOND</text>
+
+  <!-- ============ measured facts, as a spec strip ============ -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+    <g transform="translate(78 370)">
+      <text fill="#3ef2a0" font-size="15" letter-spacing="0.5">0.00 ms</text>
+      <text y="18" fill="#56526a" font-size="10.5" letter-spacing="1.8">STEADY-STATE DRIFT</text>
+    </g>
+    <g transform="translate(296 370)">
+      <text fill="#3ef2a0" font-size="15" letter-spacing="0.5">±0.5 ms</text>
+      <text y="18" fill="#56526a" font-size="10.5" letter-spacing="1.8">CLOCK SPREAD</text>
+    </g>
+    <g transform="translate(468 370)">
+      <text fill="#3ef2a0" font-size="15" letter-spacing="0.5">20 ms</text>
+      <text y="18" fill="#56526a" font-size="10.5" letter-spacing="1.8">OPUS FRAMES</text>
+    </g>
+    <g transform="translate(626 370)">
+      <text fill="#3ef2a0" font-size="15" letter-spacing="0.5">0</text>
+      <text y="18" fill="#56526a" font-size="10.5" letter-spacing="1.8">LATE IN 11,980</text>
+    </g>
+  </g>
+
+  <rect x="0" y="416" width="1280" height="4" fill="#ff5f1f" opacity="0.85"/>
 </svg>

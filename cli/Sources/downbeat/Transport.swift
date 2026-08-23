@@ -65,10 +65,10 @@ final class Transport: NSObject, @unchecked Sendable {
         case alreadyHosted(String)
         var description: String {
             switch self {
-            case .http(let c, let b): "Server antwortete \(c): \(b)"
-            case .badResponse: "unerwartete Antwort vom Server"
+            case .http(let c, let b): "server replied \(c): \(b)"
+            case .badResponse: "unexpected response from the server"
             case .alreadyHosted(let code):
-                "Raum \(code) wird bereits bespielt. Mit --takeover übernehmen."
+                "room \(code) is already being hosted. Use --takeover to take it."
             }
         }
     }
@@ -125,7 +125,7 @@ final class Transport: NSObject, @unchecked Sendable {
         components.queryItems = [
             .init(name: "code", value: code),
             .init(name: "role", value: "source"),
-            .init(name: "name", value: "Mac (Quelle)"),
+            .init(name: "name", value: "Mac (source)"),
             .init(name: "hostToken", value: hostToken),
         ]
         let task = session.webSocketTask(with: components.url!)
@@ -213,7 +213,7 @@ final class Transport: NSObject, @unchecked Sendable {
         components.queryItems = [
             .init(name: "code", value: code),
             .init(name: "role", value: "source"),
-            .init(name: "name", value: "Mac (Quelle)"),
+            .init(name: "name", value: "Mac (source)"),
             .init(name: "hostToken", value: hostToken),
         ]
         let task = session.webSocketTask(with: components.url!)

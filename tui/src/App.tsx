@@ -270,7 +270,7 @@ function sections(props: BodyProps, width: number): ReactNode {
     const peak = status ? `${num(status.peakDb, 6, 1)} dBFS` : "     — dBFS";
     blocks.push(
       <Box flexDirection="column" key="scope">
-        <Rule title="Pegel" right={peak} rightColor={peakColor(status?.peakDb)} width={width} />
+        <Rule title="Level" right={peak} rightColor={peakColor(status?.peakDb)} width={width} />
         <Scope values={levels} width={width} height={layout.scope} />
       </Box>,
     );
@@ -281,8 +281,8 @@ function sections(props: BodyProps, width: number): ReactNode {
     blocks.push(
       <Box flexDirection="column" key="devices">
         <Rule
-          title="Geräte"
-          right={count === 0 ? "keine" : count === 1 ? "1 verbunden" : `${count} verbunden`}
+          title="Speakers"
+          right={count === 0 ? "none" : count === 1 ? "1 connected" : `${count} connected`}
           rightColor={count === 0 ? C.dim : C.lock}
           width={width}
         />
@@ -294,7 +294,7 @@ function sections(props: BodyProps, width: number): ReactNode {
   if (layout.telemetry > 0) {
     blocks.push(
       <Box flexDirection="column" key="telemetry">
-        <Rule title="Telemetrie" right={phase.offline ? "offline" : undefined} width={width} />
+        <Rule title="Telemetry" right={phase.offline ? "offline" : undefined} width={width} />
         <Telemetry stats={telemetryStats(props)} width={width} columns={layout.statColumns} rows={layout.telemetry} />
       </Box>,
     );
@@ -303,7 +303,7 @@ function sections(props: BodyProps, width: number): ReactNode {
   if (layout.log > 0) {
     blocks.push(
       <Box flexDirection="column" key="log">
-        <Rule title={picking ? "Quelle" : "Protokoll"} width={width} />
+        <Rule title={picking ? "Source" : "Log"} width={width} />
         {picking ? (
           <SourcePicker sources={sources} current={status?.source ?? null} width={width} />
         ) : (
@@ -325,12 +325,12 @@ function sections(props: BodyProps, width: number): ReactNode {
 function JoinCard({ layout, room, config, width }: BodyProps & { width: number }) {
   const plan = layout.join;
   const code = room?.code ?? "······";
-  const host = room?.host ?? (config?.offline ? "offline — nur dieser Mac" : "…");
+  const host = room?.host ?? (config?.offline ? "offline — this Mac only" : "…");
 
   return (
     <>
       <Box flexDirection="column">
-      {plan.rule ? <Rule title="Beitreten" width={width} /> : null}
+      {plan.rule ? <Rule title="Join" width={width} /> : null}
       {plan.qr && room ? <QrCode rows={room.qr} quiet={plan.qr.quiet} /> : null}
       {plan.gap ? <Text> </Text> : null}
       {plan.big ? (
@@ -357,9 +357,9 @@ function JoinCard({ layout, room, config, width }: BodyProps & { width: number }
       {plan.config ? (
         <Box flexDirection="column">
           <Text> </Text>
-          <Rule title="Quelle" width={width} />
+          <Rule title="Source" width={width} />
           <Field
-            label="Aufnahme"
+            label="Capturing"
             value={config ? `${config.source}` : "—"}
             width={width}
             color={C.ink}
@@ -374,7 +374,7 @@ function JoinCard({ layout, room, config, width }: BodyProps & { width: number }
             label="Monitor"
             value={
               config
-                ? `${config.muted ? "stumm" : "hörbar"}${config.local ? ` ${G.dot} spielt mit` : ""}`
+                ? `${config.muted ? "muted" : "audible"}${config.local ? ` ${G.dot} playing along` : ""}`
                 : "—"
             }
             width={width}
@@ -456,16 +456,16 @@ function Footer({
   source: string | null;
 }) {
   const note = coreExited
-    ? `Kern beendet ${G.dot} ${coreExited.reason}`
+    ? `engine exited ${G.dot} ${coreExited.reason}`
     : stopping
-      ? "wird beendet, Quelle wird wieder hörbar…"
+      ? "stopping — the source becomes audible again…"
       : (phase.note ?? room?.url ?? "");
 
   // Keys first: they are the only thing here the reader can act on.
   const keys: Array<[string, string]> = [
-    ["q", "beenden"],
-    ["m", muted ? "laut" : "stumm"],
-    ["s", "quelle"],
+    ["q", "quit"],
+    ["m", muted ? "unmute" : "mute"],
+    ["s", "source"],
     ["±", `${Math.round(gain * 100)}%`],
   ];
   const keyWidth = keys.reduce((n, [k, l]) => n + k.length + l.length + 3, 0);
@@ -483,7 +483,7 @@ function Footer({
         ))}
       </Text>
       <Text dimColor={!muted} bold={muted} wrap="truncate-end">
-        {truncate(muted ? `${G.stop} Mac stumm ${G.dot} ${note}` : (source ? `${source} ${G.dot} ${note}` : note),
+        {truncate(muted ? `${G.stop} host muted ${G.dot} ${note}` : (source ? `${source} ${G.dot} ${note}` : note),
                   Math.max(0, space))}
       </Text>
     </Box>
@@ -508,21 +508,21 @@ function SourcePicker({
 }) {
   return (
     <Box flexDirection="column" width={width}>
-      <Text bold>{"QUELLE WÄHLEN"}</Text>
-      <Text dimColor>{`a  alles was der Mac abspielt${current ? `   (jetzt: ${current})` : ""}`}</Text>
+      <Text bold>{"CHOOSE SOURCE"}</Text>
+      <Text dimColor>{`a  everything this Mac plays${current ? `   (now: ${current})` : ""}`}</Text>
       {sources.length === 0 ? (
-        <Text dimColor>{"  keine App gefunden — spielt gerade etwas?"}</Text>
+        <Text dimColor>{"  no app found — is anything playing?"}</Text>
       ) : (
         sources.slice(0, 8).map((src, i) => (
           <Text key={src.pid}>
             <Text bold>{String(i + 1)}</Text>
             <Text dimColor>{"  "}</Text>
             <Text bold={src.active}>{truncate(src.name, Math.max(8, width - 12))}</Text>
-            <Text dimColor>{src.active ? "  spielt" : ""}</Text>
+            <Text dimColor>{src.active ? "  playing" : ""}</Text>
           </Text>
         ))
       )}
-      <Text dimColor>{"esc  abbrechen"}</Text>
+      <Text dimColor>{"esc  cancel"}</Text>
     </Box>
   );
 }
@@ -562,19 +562,19 @@ function derivePhase(input: {
   if (coreExited) {
     return {
       key: "exited",
-      label: "BEENDET",
+      label: "EXITED",
       glyph: G.stop,
       color: C.alarm,
-      note: `Kern beendet ${G.dot} ${coreExited.reason}`,
+      note: `engine exited ${G.dot} ${coreExited.reason}`,
       noteColor: C.alarm,
       offline,
     };
   }
   if (stopping) {
-    return { key: "stopping", label: "STOPPT", glyph: G.stop, color: C.warn, offline };
+    return { key: "stopping", label: "STOPPING", glyph: G.stop, color: C.warn, offline };
   }
   if (!config || !status || (!room && !offline)) {
-    return { key: "starting", label: "STARTET", glyph: G.idle, color: C.dim, offline };
+    return { key: "starting", label: "STARTING", glyph: G.idle, color: C.dim, offline };
   }
 
   const now = Date.now();
@@ -585,12 +585,12 @@ function derivePhase(input: {
 
   if (primed && (starving || reanchoring || (!status.synced && !offline) || badDevice)) {
     const note = starving
-      ? "Puffer läuft leer — Quelle liefert zu wenig Audio"
+      ? "buffer running dry — the source is not keeping up"
       : reanchoring
         ? "Uhr neu verankert — Wiedergabe wurde nachgezogen"
         : !status.synced
-          ? "keine Uhr-Synchronisation zum Raum"
-          : "ein Gerät läuft außer Takt";
+          ? "no clock sync with the room"
+          : "a speaker is out of step";
     return {
       key: "degraded",
       label: "GESTÖRT",
@@ -603,10 +603,10 @@ function derivePhase(input: {
   }
 
   if (offline) {
-    return { key: "synced", label: "LOKAL", glyph: G.locked, color: C.pulse, note: "offline — nur dieser Mac", offline };
+    return { key: "synced", label: "LOCAL", glyph: G.locked, color: C.pulse, note: "offline — this Mac only", offline };
   }
   if (!status.synced || !primed) {
-    return { key: "connecting", label: "VERBINDET", glyph: G.waiting, color: C.warn, note: "Uhr wird eingemessen…", offline };
+    return { key: "connecting", label: "CONNECTING", glyph: G.waiting, color: C.warn, note: "Uhr wird eingemessen…", offline };
   }
   if (!members.length) {
     return {
@@ -619,29 +619,29 @@ function derivePhase(input: {
       offline,
     };
   }
-  return { key: "synced", label: "SYNCHRON", glyph: G.locked, color: C.lock, note: room?.url, noteColor: C.muted, offline };
+  return { key: "synced", label: "IN SYNC", glyph: G.locked, color: C.lock, note: room?.url, noteColor: C.muted, offline };
 }
 
 function telemetryStats({ status, config, phase }: BodyProps): Stat[] {
   const clockOk = status?.synced && !phase.offline;
   const stats: Stat[] = [
     {
-      label: "UHR",
+      label: "CLOCK",
       value: status ? `±${ms(status.clockMs, 4).trim()}` : "—",
       color: phase.offline ? C.dim : clockOk ? C.lock : C.warn,
     },
     { label: "BITRATE", value: status ? `${num(status.kbits, 3)} kbit/s` : "—" },
-    { label: "PAKETE", value: status ? group(status.packets) : "—" },
-    { label: "AUFNAHME", value: status ? `${num(status.capturedSec, 5, 1)} s` : "—" },
-    { label: "PUFFER", value: config ? `${config.bufferMs} ms` : "—", color: C.muted },
+    { label: "PACKETS", value: status ? group(status.packets) : "—" },
+    { label: "CAPTURED", value: status ? `${num(status.capturedSec, 5, 1)} s` : "—" },
+    { label: "BUFFER", value: config ? `${config.bufferMs} ms` : "—", color: C.muted },
     {
-      label: "UNTERLAUF",
+      label: "UNDERRUN",
       value: status ? group(status.starved) : "—",
       color: phase.key === "degraded" ? C.warn : C.muted,
     },
   ];
   if (status && status.reanchors > 0) {
-    stats.splice(4, 0, { label: "NEUANKER", value: group(status.reanchors), color: C.warn });
+    stats.splice(4, 0, { label: "RESYNC", value: group(status.reanchors), color: C.warn });
   }
   return stats;
 }

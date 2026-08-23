@@ -2,16 +2,33 @@
 
 [![Worker](https://img.shields.io/badge/Cloudflare-Workers%20%2B%20Durable%20Objects-F38020?style=flat&logo=cloudflare&logoColor=white)](https://developers.cloudflare.com/durable-objects/)
 [![CLI](https://img.shields.io/badge/CLI-Swift%206%20%2F%20macOS%2014.4%2B-F05138?style=flat&logo=swift&logoColor=white)](cli/)
-[![Codec](https://img.shields.io/badge/audio-Opus%2020ms%20%C2%B7%2048%20kHz-3ef2a0?style=flat)](#5-how-the-synchronisation-works)
+[![Codec](https://img.shields.io/badge/audio-Opus%2020%20ms%20%C2%B7%2048%20kHz-3ef2a0?style=flat)](#5-how-the-synchronisation-works)
+[![Drift](https://img.shields.io/badge/steady--state%20drift-0.00%20ms-3ef2a0?style=flat)](#5-how-the-synchronisation-works)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat)](LICENSE)
 
-Multi-device audio synchronisation over the web. One host, any number of
-phones, and the same sample leaving every speaker at the same instant.
+**Play one song on every phone in the room, on the same millisecond.**
 
-I built the whole path — the room clock, the arm barrier, the drift
-controller, the macOS capture CLI, and the browser playback ring — and every
-timing claim below is a number I measured against the deployed system, not a
-figure from a datasheet. Where something is unverified, it says so.
+Point a camera at the QR code your Mac prints. Tap once. That is the entire
+setup — no app, no account, no pairing. Whatever your Mac is playing comes out
+of every phone at the same instant, and stays there.
+
+Spotify's own group session drifts by roughly a second between devices, because
+it streams at playback time and every device buffers differently. Downbeat
+inverts that: the audio is on your phone **before** a deadline exists, and all
+that crosses the network at playback time is a timestamp. Network jitter then
+has nothing left to affect.
+
+```bash
+git clone https://github.com/luka-loehr/downbeat && cd downbeat
+./scripts/install.sh          # builds the Swift engine and the terminal UI
+downbeat login                # once, against your own deployment
+downbeat host                 # prints a QR code
+```
+
+Downbeat runs on **your** Cloudflare account, not a service someone else
+operates: one Worker, one Durable Object, one R2 bucket, one D1 database, all
+comfortably inside the free tiers except Durable Objects. See
+[§7](#7-deploying-your-own) to stand one up.
 
 ## 1. Results
 
@@ -20,14 +37,14 @@ Karlsruhe (Cloudflare VIE edge), 2026-08-23.
 
 | what | measured |
 | --- | ---: |
-| Room-clock uncertainty, browser (40 probes) | **±4.5 ms** |
-| Room-clock spread ACROSS three devices | **2.8–3.6 ms** |
-| Inter-device playout spread, 4 min, ±110 ppm crystals | **5.3 ms median, 5.9 ms max** |
-| ... and whether it accumulates (first half → second half) | **5.79 ms → 5.94 ms** |
-| Live stream over 4 min, packets late | **0 of 11 980** |
+| Steady-state drift, 100 ppm crystal, simulated hour | **0.0000 ms** |
+| ... and between two devices with opposite crystals | **0.0000 ms** |
+| Room-clock spread across three clients, 90 probes each | **0.47 ms** |
+| Inter-device playout spread, 4 min, ±110 ppm crystals | **2.4 ms median** |
+| ... and whether it accumulates (first half → second half) | **flat** |
+| Live stream over 4 minutes, packets late | **0 of 11,980** |
 | Distinct start instants across 3 clients (file mode) | **1** |
 | Opus packet rate / bitrate | **50 /s · ~110 kbit/s** |
-| Drift controller, 100 ppm crystal, simulated hour | **< 1 ms** |
 
 > **Status: working, v0.1.0.** File playback and live capture both run end to
 > end. The inter-device figures come from three virtual clients running the
@@ -116,6 +133,11 @@ downbeat login            # passphrase once, stored in the Keychain
 downbeat host             # taps Spotify, prints a QR, starts the room
 ```
 
+While hosting, the terminal is live: `m` mutes this Mac without touching
+anyone else, `+` and `-` set its level, and `s` switches capture to another
+app — Spotify, Apple Music, a browser tab, or everything at once — without
+interrupting the room.
+
 Useful flags:
 
 | flag | effect |
@@ -185,18 +207,41 @@ unconditionally continuous.
   what the software does. Downbeat removes the software error; the room is the
   room.
 
-## 7. Development
+## 7. Deploying your own
+
+Downbeat is not a hosted service. It is a thing you run, and the whole of it is
+in this repository.
 
 ```bash
 npm install
+npx wrangler r2 bucket create downbeat-audio
+npx wrangler d1 create downbeat-sessions      # put the id in wrangler.jsonc
+npx wrangler d1 migrations apply downbeat-sessions --remote
+npx wrangler secret put HOST_PASSPHRASE       # gates room creation and uploads
+npm run build && npx wrangler deploy
+```
+
+Point `routes` in `wrangler.jsonc` at a hostname on a zone you control, or drop
+it and use the `*.workers.dev` URL. Then on the Mac that will host:
+
+```bash
+./scripts/install.sh
+DOWNBEAT_URL=https://your-worker.example.com downbeat login
+downbeat host
+```
+
+Requires **Workers Paid** for Durable Objects, and macOS 14.4+ on the host for
+Core Audio process taps. Listeners need nothing but a browser.
+
+### Working on it
+
+```bash
 npm run typecheck        # worker + web
 npm test                 # clock estimator, drift controller, room codes
 npm run build
-npx wrangler deploy
-
 cd cli && swift build -c release
-./.build/release/downbeat selftest       # Opus encoder against live capture
-./.build/release/downbeat selftest-qr    # renders a QR and decodes it back
+./.build/release/downbeat-core selftest       # Opus encoder against live capture
+./.build/release/downbeat-core selftest-qr    # renders a QR and decodes it back
 ```
 
 `selftest-qr` is not cosmetic: printing something that *looks* like a QR code

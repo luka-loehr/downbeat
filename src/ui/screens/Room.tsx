@@ -46,7 +46,7 @@ export function Room({ code, hostToken }: { code: string; hostToken: string | nu
           {naming ? (
             <>
               <label className="mb-3 block text-[11px] uppercase tracking-[0.3em] text-muted">
-                Wie heißt dieser Lautsprecher?
+                What should we call this speaker?
               </label>
               <input
                 value={name}
@@ -57,14 +57,14 @@ export function Room({ code, hostToken }: { code: string; hostToken: string | nu
                 autoCorrect="off"
                 className="w-full rounded-xl border border-line bg-panel px-5 py-4 text-center text-lg text-ink outline-none transition-colors focus:border-pulse"
               />
-              <p className="mt-3 text-[11px] text-dim">Nur einmal — danach merkt sich dein Gerät das.</p>
+              <p className="mt-3 text-[11px] text-dim">Once only — your device remembers from now on.</p>
             </>
           ) : (
             <button
               onClick={() => setNaming(true)}
               className="num mb-5 w-full text-[11px] uppercase tracking-[0.24em] text-dim transition-colors hover:text-muted"
             >
-              {name} · umbenennen
+              {name} · rename
             </button>
           )}
 
@@ -73,14 +73,14 @@ export function Room({ code, hostToken }: { code: string; hostToken: string | nu
             disabled={joining}
             className="mt-4 w-full rounded-2xl bg-pulse px-6 py-8 text-base font-bold uppercase tracking-[0.24em] text-void transition-opacity active:opacity-80 disabled:opacity-40"
           >
-            {joining ? "Verbinde…" : "Tap to play"}
+            {joining ? "Connecting…" : "Tap to play"}
           </button>
           <p className="mt-6 text-xs leading-relaxed text-dim">
-            Ein Tap startet den Ton — Browser erlauben Audio nur so.
+            One tap starts the audio — browsers allow it no other way.
             <br />
-            Lautstärke jetzt aufdrehen.
+            Turn the volume up now.
           </p>
-          <p className="num mt-5 text-[10px] tracking-[0.22em] text-dim">RAUM {code}</p>
+          <p className="num mt-5 text-[10px] tracking-[0.22em] text-dim">ROOM {code}</p>
           {failure && <p className="mt-4 text-sm text-pulse">{failure}</p>}
         </div>
       </main>

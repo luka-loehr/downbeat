@@ -34,12 +34,12 @@ final class ProcessTap {
 
         var description: String {
             switch self {
-            case .processNotFound(let p): "kein Audio-Objekt für PID \(p) — läuft der Prozess und gibt er Ton aus?"
-            case .tapFailed(let s): "Tap konnte nicht erstellt werden (OSStatus \(s))"
-            case .formatFailed(let s): "Tap-Format nicht lesbar (OSStatus \(s))"
-            case .aggregateFailed(let s): "Aggregate-Device fehlgeschlagen (OSStatus \(s))"
-            case .ioProcFailed(let s): "IOProc fehlgeschlagen (OSStatus \(s))"
-            case .startFailed(let s): "Start fehlgeschlagen (OSStatus \(s))"
+            case .processNotFound(let p): "no audio object for pid \(p) — is it running and playing?"
+            case .tapFailed(let s): "could not create the tap (OSStatus \(s))"
+            case .formatFailed(let s): "could not read the tap format (OSStatus \(s))"
+            case .aggregateFailed(let s): "aggregate device failed (OSStatus \(s))"
+            case .ioProcFailed(let s): "IOProc failed (OSStatus \(s))"
+            case .startFailed(let s): "start failed (OSStatus \(s))"
             }
         }
     }

@@ -26,9 +26,9 @@ final class OpusEncoder {
         case encodeFailed(OSStatus)
         var description: String {
             switch self {
-            case .createFailed(let s): "Opus-Encoder nicht verfügbar (OSStatus \(s))"
-            case .bitrateFailed(let s): "Bitrate ließ sich nicht setzen (OSStatus \(s))"
-            case .encodeFailed(let s): "Opus-Encoding fehlgeschlagen (OSStatus \(s))"
+            case .createFailed(let s): "Opus encoder unavailable (OSStatus \(s))"
+            case .bitrateFailed(let s): "could not set the bitrate (OSStatus \(s))"
+            case .encodeFailed(let s): "Opus encoding failed (OSStatus \(s))"
             }
         }
     }
@@ -67,7 +67,7 @@ final class OpusEncoder {
         let brStatus = AudioConverterSetProperty(converter!, kAudioConverterEncodeBitRate,
                                                  UInt32(MemoryLayout<UInt32>.size), &rate)
         // Not every encoder accepts an explicit bitrate; its default is fine.
-        if brStatus != noErr { NSLog("downbeat: Bitrate nicht gesetzt (\(brStatus)), nutze Standard") }
+        if brStatus != noErr { NSLog("downbeat: bitrate not set (\(brStatus)), using the default") }
 
         var actual = AudioStreamBasicDescription()
         var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)

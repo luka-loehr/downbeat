@@ -76,9 +76,9 @@ final class LocalPlayer {
         case startFailed(OSStatus)
         var description: String {
             switch self {
-            case .noDefaultOutput(let s): "kein Standard-Ausgabegerät (OSStatus \(s))"
-            case .ioProcFailed(let s): "Ausgabe-IOProc fehlgeschlagen (OSStatus \(s))"
-            case .startFailed(let s): "Ausgabe-Start fehlgeschlagen (OSStatus \(s))"
+            case .noDefaultOutput(let s): "no default output device (OSStatus \(s))"
+            case .ioProcFailed(let s): "Ausgabe-IOProc failed (OSStatus \(s))"
+            case .startFailed(let s): "Ausgabe-start failed (OSStatus \(s))"
             }
         }
     }

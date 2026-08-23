@@ -69,21 +69,21 @@ func parseOptions() -> Options {
         case "--offline": o.offline = true
         case "-h", "--help":
             print("""
-            downbeat login              Passphrase einmalig speichern
-            downbeat logout             hinterlegte Passphrase löschen
-            downbeat host [Optionen]
+            downbeat login              store the host passphrase once
+            downbeat logout             forget the stored passphrase
+            downbeat host [options]
 
-              --source <app|system|pid>  Quelle: App-Name (Spotify, Music, …),
-                                         "system" für alles, oder eine PID
-              --buffer <ms>              Verzögerung, Standard 2000
-              --code <ABC123>            fester Raumcode statt zufällig
-              --takeover                 laufende Session dieses Codes übernehmen
-              --passphrase <wort>        Host-Passphrase (sonst gespeicherte)
-              --url <https://...>        Server (oder DOWNBEAT_URL)
-              --no-mute                  Quelle lokal NICHT stummschalten
-              --no-local                 auf diesem Mac nicht mitspielen
-              --offline                  nur lokal, kein Raum
-              --json                     NDJSON-Ereignisse statt Textausgabe
+              --source <app|system|pid>  app name (Spotify, Music, …),
+                                         "system" for everything, or a pid
+              --buffer <ms>              delay before playback, default 2000
+              --code <ABC123>            fixed room code instead of random
+              --takeover                 take over a room already hosted
+              --passphrase <word>        pass it directly instead of the store
+              --url <https://...>        a different server
+              --no-mute                  do NOT mute the source locally
+              --no-local                 do not play on this Mac
+              --offline                  local only, no room
+              --json                     NDJSON events instead of text
             """)
             exit(0)
         default: break
@@ -139,20 +139,20 @@ func serverHost(from args: [String]) -> (URL, String) {
 switch CommandLine.arguments.dropFirst().first {
 case "login":
     let (url, host) = serverHost(from: Array(CommandLine.arguments))
-    guard let passphrase = Credentials.prompt("Host-Passphrase für \(host): ") else {
-        die("keine Passphrase eingegeben")
+    guard let passphrase = Credentials.prompt("Host passphrase for \(host): ") else {
+        die("no passphrase entered")
     }
     // Verify before storing, so a typo is caught now and not at the party.
     let probe = Transport(baseURL: url, clock: RoomClock())
     do { try probe.createRoom(passphrase: passphrase) }
-    catch { die("Anmeldung fehlgeschlagen — \(error)") }
-    guard Credentials.save(passphrase, host: host) else { die("konnte \(Credentials.location) nicht schreiben") }
-    print("angemeldet an \(host) — Passphrase in \(Credentials.location) (nur für dich lesbar)")
+    catch { die("login failed — \(error)") }
+    guard Credentials.save(passphrase, host: host) else { die("could not write \(Credentials.location)") }
+    print("logged in to \(host) — passphrase stored in \(Credentials.location), readable only by you")
     exit(0)
 case "logout":
     let (_, host) = serverHost(from: Array(CommandLine.arguments))
     Credentials.delete(host: host)
-    print("abgemeldet von \(host)")
+    print("logged out of \(host)")
     exit(0)
 default:
     break
@@ -161,14 +161,14 @@ default:
 if CommandLine.arguments.dropFirst().first == "selftest-qr" {
     let sample = "https://downbeat.lukaloehr.com/r/ABC123"
     guard let modules = TerminalQR.modules(for: sample) else {
-        die("QR konnte nicht erzeugt werden")
+        die("could not generate the QR")
     }
     print(TerminalQR.render(modules))
-    print("Module          \(modules.count)x\(modules.first?.count ?? 0)")
+    print("modules         \(modules.count)x\(modules.first?.count ?? 0)")
     let decoded = TerminalQR.decodes(modules, to: sample)
-    print("zurückdekodiert \(decoded ?? "NICHTS")")
-    print(decoded == sample ? "PASS  das gedruckte Muster ist ein scanbarer QR-Code"
-                            : "FAIL  Muster ist nicht lesbar")
+    print("decoded back    \(decoded ?? "NICHTS")")
+    print(decoded == sample ? "PASS  the printed pattern is a scannable QR code"
+                            : "FAIL  the pattern is not readable")
     exit(decoded == sample ? 0 : 1)
 }
 
@@ -176,14 +176,14 @@ let options = parseOptions()
 Events.enabled = options.json
 
 if options.pid == nil && options.sourceLabel != "System" {
-    die("\(options.sourceLabel) läuft nicht — starte es und spiel etwas ab.")
+    die("\(options.sourceLabel) is not running — start it and play something.")
 }
 var passphrase = options.passphrase
 if !options.offline && passphrase.isEmpty {
     passphrase = Credentials.load(host: options.baseURL.host ?? "downbeat") ?? ""
 }
 if !options.offline && passphrase.isEmpty {
-    die("nicht angemeldet. Einmal `downbeat login` ausführen.")
+    die("not logged in. Run `downbeat login` once.")
 }
 
 let clock = RoomClock()
@@ -225,7 +225,7 @@ if !options.offline {
     t.onLink = { @Sendable up, reason in
         Events.emit(["t": "link", "up": up, "reason": reason])
         Events.log(up ? "info" : "warn",
-                   up ? "Verbindung wiederhergestellt" : "Verbindung verloren: \(reason)")
+                   up ? "reconnected" : "connection lost: \(reason)")
     }
     t.onMembers = { @Sendable snapshot in
         listenerCount.store(snapshot.count, ordering: .relaxed)
@@ -235,7 +235,7 @@ if !options.offline {
     }
     t.connect()
     transport = t
-    Events.log("info", "Raum \(t.code) geöffnet")
+    Events.log("info", "room \(t.code) open")
 }
 
 // ---- capture -------------------------------------------------------------
@@ -411,9 +411,9 @@ nonisolated(unsafe) var currentLabel = options.sourceLabel
         }
         currentLabel = label
         Events.emit(["t": "source", "label": label, "pid": Int(pid ?? 0)])
-        Events.log("info", "Quelle: \(label)")
+        Events.log("info", "source: \(label)")
     } catch {
-        Events.log("error", "Quellenwechsel fehlgeschlagen: \(error)")
+        Events.log("error", "source switch failed: \(error)")
         // Put the previous source back rather than leaving the room silent.
         try? tap.start(pid: options.pid, mute: options.mute) { @Sendable s, f, h in
             captureCallback(s, f, h)
@@ -463,9 +463,9 @@ nonisolated func shutdown() {
     player?.stop()
     tap.stop()
     if Events.enabled {
-        Events.log("info", "gestoppt — Quelle ist wieder hörbar")
+        Events.log("info", "stopped — the source is audible again")
     } else {
-        print("\ngestoppt — Quelle ist wieder hörbar")
+        print("\nstopped — the source is audible again")
     }
 }
 
@@ -498,10 +498,10 @@ if options.json {
     }
 } else {
     print("")
-    print("  Quelle    \(options.sourceLabel)  \(Int(rate)) Hz, \(channels) ch")
-    print("  Puffer    \(Int(options.bufferMs)) ms")
-    print("  Lokal     \(options.mute ? "stummgeschaltet" : "hörbar")"
-          + (options.playLocally ? ", Wiedergabe über Downbeat" : ", keine Wiedergabe"))
+    print("  Source    \(options.sourceLabel)  \(Int(rate)) Hz, \(channels) ch")
+    print("  Buffer    \(Int(options.bufferMs)) ms")
+    print("  Local     \(options.mute ? "source muted" : "source audible")"
+          + (options.playLocally ? ", playing through Downbeat" : ", not playing"))
     if let t = transport {
         let joinURL = options.baseURL.appendingPathComponent("r").appendingPathComponent(t.code)
         if let modules = TerminalQR.modules(for: joinURL.absoluteString) {
@@ -509,12 +509,12 @@ if options.json {
             print(TerminalQR.render(modules), terminator: "")
         }
         print("")
-        print("  Kamera drauf halten  –  oder Code eingeben:")
+        print("  Point a camera here  –  or type the code:")
         print("  \u{1b}[1m\(t.code)\u{1b}[0m   \((joinURL.host ?? "") + joinURL.path)")
     } else {
-        print("  Modus     offline (nur dieser Mac)")
+        print("  Mode      offline (this Mac only)")
     }
-    print("\n  Strg-C zum Beenden\n")
+    print("\n  Ctrl-C to stop\n")
 }
 
 let started = RoomClock.localNow()
@@ -562,7 +562,7 @@ while true {
         let db = peak > 0 ? String(format: "%6.1f dBFS", peakDb) : "  -inf dBFS"
         let sync = transport == nil ? "offline"
             : (clock.isSynced ? String(format: "±%.1fms", clock.uncertainty) : "sync…")
-        print(String(format: "  %@  aufgenommen %5.1fs  Pakete %5d  %5.0f kbit/s  Uhr %@  starved %d",
+        print(String(format: "  %@  captured %5.1fs  Pakete %5d  %5.0f kbit/s  Uhr %@  starved %d",
                      db, Double(captured) / rate, sent, kbits, sync, player?.starvedFrames ?? 0))
     }
 }

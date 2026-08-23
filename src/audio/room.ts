@@ -304,7 +304,7 @@ export class RoomConnection {
           bufferMs: live.bufferMs,
         });
       } catch (err) {
-        this.error = err instanceof Error ? err.message : "Live-Wiedergabe nicht möglich";
+        this.error = err instanceof Error ? err.message : "live playback unavailable";
         console.error("[downbeat] live start", err);
       }
     } else {

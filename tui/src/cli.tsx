@@ -32,9 +32,9 @@ function findCore(): string | null {
 const core = findCore();
 if (!core) {
   process.stderr.write(
-    "downbeat: downbeat-core nicht gefunden.\n" +
-      "  Bauen mit:  cd cli && swift build -c release\n" +
-      "  oder DOWNBEAT_CORE auf den Pfad setzen.\n",
+    "downbeat: downbeat-core not found.\n" +
+      "  Build it with:  cd cli && swift build -c release\n" +
+      "  or point DOWNBEAT_CORE at it.\n",
   );
   process.exit(1);
 }
@@ -45,51 +45,46 @@ const PASSTHROUGH = new Set(["login", "logout", "selftest", "selftest-qr"]);
 const VERSION = "0.1.0";
 
 const HELP = `
-  \x1b[1mdownbeat\x1b[0m — ein Song, jedes Handy, dieselbe Millisekunde
+  \x1b[1mdownbeat\x1b[0m — one song, every phone, the same millisecond
 
-  \x1b[1mBEFEHLE\x1b[0m
-    downbeat host [Optionen]     Raum öffnen und diesen Mac übertragen
-    downbeat login               Host-Passphrase im Schlüsselbund hinterlegen
-    downbeat logout              hinterlegte Passphrase löschen
-    downbeat help                diese Hilfe
-    downbeat version             Version
+  \x1b[1mCOMMANDS\x1b[0m
+    downbeat host [options]      open a room and stream this Mac
+    downbeat login               store the host passphrase
+    downbeat logout              forget the stored passphrase
+    downbeat help                this help
+    downbeat version             version
 
-  \x1b[1mOPTIONEN FÜR host\x1b[0m
-    --code <ABC123>              fester Raumcode statt zufällig
-                                 6 Zeichen aus 0-9 A-Z, ohne I L O U
-    --takeover                   laufende Session dieses Codes übernehmen
-    --buffer <ms>                Verzögerung bis zur Wiedergabe (Standard 2000)
-    --source <app|system|pid>    Quelle (Standard: spotify)
-    --no-mute                    Quelle lokal NICHT stummschalten
-    --no-local                   auf diesem Mac nicht mitspielen
-    --offline                    nur lokal, kein Raum
-    --passphrase <wort>          Passphrase direkt (sonst Schlüsselbund)
-    --url <https://...>          anderer Server
+  \x1b[1mOPTIONS FOR host\x1b[0m
+    --code <ABC123>              fixed room code instead of a random one
+                                 6 chars from 0-9 A-Z; O, I and L are read
+                                 as 0, 1 and 1, and U is not used
+    --takeover                   take over a room already being hosted
+    --buffer <ms>                delay before playback (default 2000)
+    --source <app|system|pid>    app name (Spotify, Music, …), "system"
+                                 for everything, or a process id
+    --no-mute                    do NOT mute the source locally
+    --no-local                   do not play on this Mac
+    --offline                    local only, no room
+    --passphrase <word>          pass it directly instead of using the store
+    --url <https://...>          a different server
 
-  \x1b[1mTASTEN WÄHREND host\x1b[0m
-    m                            diesen Mac stumm schalten / wieder laut
-    + / -                        Lautstärke dieses Macs
-    s                            Quelle wechseln (dann 1-8, a = alles, esc)
-    q                            beenden
+  \x1b[1mKEYS WHILE HOSTING\x1b[0m
+    m                            mute / unmute this Mac
+    + / -                        this Mac's level
+    s                            switch source (then 1-8, a = everything, esc)
+    q                            quit
 
-  \x1b[1mDIAGNOSE\x1b[0m
-    downbeat selftest            Opus-Encoder gegen echte Aufnahme prüfen
-    downbeat selftest-qr         QR rendern und zurückdekodieren
+  \x1b[1mDIAGNOSTICS\x1b[0m
+    downbeat selftest            check the Opus encoder against live capture
+    downbeat selftest-qr         render a QR and decode it back
 
-  \x1b[1mBEISPIELE\x1b[0m
-    downbeat host
-    downbeat host --code PARTY7
-    downbeat host --code PARTY7 --takeover
-    downbeat host --buffer 3000            bei schwachem WLAN
-    downbeat host --source system          alles, was der Mac abspielt
+  \x1b[1mENVIRONMENT\x1b[0m
+    DOWNBEAT_URL                 server address
+    DOWNBEAT_PASSPHRASE          passphrase (overrides the stored one)
+    DOWNBEAT_CORE                path to the capture engine
 
-  \x1b[1mUMGEBUNG\x1b[0m
-    DOWNBEAT_URL                 Server-Adresse
-    DOWNBEAT_PASSPHRASE          Passphrase (überschreibt Schlüsselbund)
-    DOWNBEAT_CORE                Pfad zur Engine
-
-  Beim Start wird \x1b[1mSpotify lokal stummgeschaltet\x1b[0m und der Ton kommt
-  \x1b[1m--buffer\x1b[0m Millisekunden später gemeinsam auf allen Geräten zurück.
+  On start, \x1b[1mthe source is muted locally\x1b[0m and its audio comes back
+  \x1b[1m--buffer\x1b[0m milliseconds later, together, on every device.
 `;
 
 const args = process.argv.slice(2);
@@ -113,9 +108,9 @@ if (PASSTHROUGH.has(command)) {
   startUI(args.slice(1));
 } else {
   process.stderr.write(
-    `downbeat: unbekannter Befehl "${command}"\n` +
-      `Bekannt: host, login, logout, help, version\n` +
-      `"downbeat help" zeigt alle Optionen.\n`,
+    `downbeat: unknown command "${command}"\n` +
+      `Known: host, login, logout, help, version\n` +
+      `Run "downbeat help" for all options.\n`,
   );
   process.exit(1);
 }

@@ -25,7 +25,7 @@ func runSelfTest(pid: pid_t?, seconds: Double) -> Never {
 
     print("Format          \(Int(tap.format.sampleRate)) Hz, \(tap.format.channels) ch")
     print("framesPerPacket \(encoder.framesPerPacket)  (= \(String(format: "%.1f", Double(encoder.framesPerPacket) / tap.format.sampleRate * 1000)) ms)")
-    print("sammle \(Int(seconds)) s ...")
+    print("collecting \(Int(seconds)) s ...")
     Thread.sleep(forTimeInterval: seconds)
     tap.stop()
 
@@ -45,19 +45,19 @@ func runSelfTest(pid: pid_t?, seconds: Double) -> Never {
     let audioSeconds = Double(frames) / tap.format.sampleRate
     let sizes = packets.map(\.count).sorted()
 
-    print("aufgenommen     \(String(format: "%.2f", audioSeconds)) s (\(frames) frames)")
-    print("Pakete          \(packets.count)")
+    print("captured     \(String(format: "%.2f", audioSeconds)) s (\(frames) frames)")
+    print("packets         \(packets.count)")
     if !packets.isEmpty {
-        print("Paketgröße      min \(sizes.first!) / median \(sizes[sizes.count/2]) / max \(sizes.last!) bytes")
+        print("packet size     min \(sizes.first!) / median \(sizes[sizes.count/2]) / max \(sizes.last!) bytes")
         print("Bitrate         \(String(format: "%.0f", Double(bytes) * 8 / audioSeconds / 1000)) kbit/s")
-        print("Nachrichtenrate \(String(format: "%.0f", Double(packets.count) / audioSeconds)) /s")
+        print("message rate    \(String(format: "%.0f", Double(packets.count) / audioSeconds)) /s")
         let expected = Int(audioSeconds * tap.format.sampleRate) / encoder.framesPerPacket
-        print("Vollständigkeit \(packets.count)/\(expected) Pakete")
-        print(packets.count >= expected - 1 ? "PASS  Encoder liefert einen lückenlosen Strom"
-                                            : "FAIL  Pakete fehlen")
+        print("completeness    \(packets.count)/\(expected) Pakete")
+        print(packets.count >= expected - 1 ? "PASS  the encoder produces a gapless stream"
+                                            : "FAIL  packets are missing")
         exit(packets.count >= expected - 1 ? 0 : 1)
     }
-    print("FAIL  keine Pakete erzeugt")
+    print("FAIL  no packets produced")
     exit(1)
 }
 

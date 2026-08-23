@@ -59,7 +59,7 @@ export function Landing({ onEnter }: { onEnter: (code: string, hostToken: string
               className="mb-6 w-full rounded-xl border border-pulse/40 bg-pulse/10 px-5 py-4 text-left transition-colors hover:bg-pulse/15"
             >
               <span className="block text-[10px] uppercase tracking-[0.28em] text-muted">
-                Zurück in den Raum
+                Back to your room
               </span>
               <span className="num mt-1 block text-2xl tracking-[0.3em] text-pulse">
                 {previous.code}

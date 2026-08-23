@@ -12,13 +12,13 @@ PREFIX="${PREFIX:-$( [ -w /usr/local/bin ] && echo /usr/local/bin || echo "$HOME
 mkdir -p "$PREFIX"
 
 echo "Repository : $REPO"
-echo "Ziel       : $PREFIX"
+echo "Target     : $PREFIX"
 
-echo "→ Engine bauen (Swift)"
+echo "-> building the capture engine (Swift)"
 ( cd "$REPO/cli" && swift build -c release )
 install -m 755 "$REPO/cli/.build/release/downbeat-core" "$PREFIX/downbeat-core"
 
-echo "→ Oberfläche bauen (Ink)"
+echo "-> building the terminal UI (Ink)"
 ( cd "$REPO/tui" && npm ci --silent --no-audit --no-fund 2>/dev/null || npm install --silent --no-audit --no-fund )
 ( cd "$REPO/tui" && npm run --silent build )
 
@@ -30,8 +30,8 @@ LAUNCHER
 chmod 755 "$PREFIX/downbeat"
 
 echo
-echo "Installiert:"
+echo "Installed:"
 echo "  $PREFIX/downbeat"
 echo "  $PREFIX/downbeat-core"
 echo
-echo "Loslegen:  downbeat login   und dann   downbeat host"
+echo "Next:  downbeat login   then   downbeat host"
