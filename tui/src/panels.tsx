@@ -42,7 +42,7 @@ export function Rule({
 export interface DeviceState {
   glyph: string;
   label: string;
-  color: string;
+  color: string | undefined;
   bad: boolean;
 }
 
@@ -129,13 +129,13 @@ export function Devices({
       const state = deviceState(m);
       body.push(
         <Text key={m.id} wrap="truncate-end">
-          <Text color={state.bad ? C.warn : C.ink}>{padEnd(m.name, nameW)} </Text>
+          <Text bold={state.bad}>{padEnd(m.name, nameW)} </Text>
           {tier >= 3 ? <Text color={C.dim}>{padEnd(m.id.slice(0, W_ID), W_ID)} </Text> : null}
           {tier >= 2 ? (
             <Text color={C.muted}>{padStart(m.rtt ? `${Math.round(m.rtt)} ms` : "—", W_RTT)} </Text>
           ) : null}
           {tier >= 1 ? (
-            <Text color={state.bad ? C.warn : C.muted}>
+            <Text bold={state.bad} dimColor={!state.bad}>
               {padStart(m.sync ? `±${m.sync.toFixed(1)} ms` : "—", W_SYNC)}{" "}
             </Text>
           ) : null}
@@ -235,7 +235,7 @@ export function LogView({ lines, width, rows }: { lines: LogLine[]; width: numbe
   );
 }
 
-function levelColor(level: string): string {
+function levelColor(level: string): string | undefined {
   return level === "error" ? C.alarm : level === "warn" ? C.warn : C.muted;
 }
 

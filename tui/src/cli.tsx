@@ -66,6 +66,12 @@ const HELP = `
     --passphrase <wort>          Passphrase direkt (sonst Schlüsselbund)
     --url <https://...>          anderer Server
 
+  \x1b[1mTASTEN WÄHREND host\x1b[0m
+    m                            diesen Mac stumm schalten / wieder laut
+    + / -                        Lautstärke dieses Macs
+    s                            Quelle wechseln (dann 1-8, a = alles, esc)
+    q                            beenden
+
   \x1b[1mDIAGNOSE\x1b[0m
     downbeat selftest            Opus-Encoder gegen echte Aufnahme prüfen
     downbeat selftest-qr         QR rendern und zurückdekodieren
@@ -115,9 +121,19 @@ if (PASSTHROUGH.has(command)) {
 }
 
 function startUI(hostArgs: string[]) {
+  // stdin carries runtime commands: a keystroke has to travel to the engine.
   const child = spawn(core!, ["host", ...hostArgs, "--json"], {
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
   });
+
+  const send = (command: Record<string, unknown>) => {
+    if (!child.stdin.writable) return;
+    try {
+      child.stdin.write(JSON.stringify(command) + "\n");
+    } catch {
+      /* engine gone; the UI is about to unmount anyway */
+    }
+  };
 
   const listeners = new Set<(event: CoreEvent) => void>();
   /** Kept so a core that dies can explain itself after the screen is restored. */
@@ -185,6 +201,7 @@ function startUI(hostArgs: string[]) {
           return () => listeners.delete(fn);
         }}
         onQuit={stopCore}
+      send={send}
         coreExited={exited}
       />,
     );
@@ -196,6 +213,7 @@ function startUI(hostArgs: string[]) {
         return () => listeners.delete(fn);
       }}
       onQuit={stopCore}
+      send={send}
       coreExited={exited}
     />,
     { exitOnCtrlC: false },

@@ -1,5 +1,5 @@
 import { RoomDO } from "./room-do";
-import { generateCode, isValidCode } from "../shared/code";
+import { generateCode, isValidCode, normalizeCode } from "../shared/code";
 import { BUILD_ID } from "../shared/build";
 import { CODE_ALPHABET, CODE_LENGTH } from "../shared/protocol";
 import type { Track } from "../shared/protocol";
@@ -132,7 +132,7 @@ async function createRoom(request: Request, env: Env): Promise<Response> {
   // already required the passphrase.
   let code: string;
   if (body.code) {
-    code = body.code.toUpperCase();
+    code = normalizeCode(body.code);
     if (!isValidCode(code)) {
       return json({ error: `bad code: ${CODE_LENGTH} chars from ${CODE_ALPHABET}` }, 400);
     }
@@ -185,7 +185,7 @@ async function endRoom(request: Request, env: Env): Promise<Response> {
     code?: string;
     hostToken?: string;
   };
-  const code = (body.code ?? "").toUpperCase();
+  const code = normalizeCode(body.code ?? "");
   if (!isValidCode(code)) return json({ error: "bad room code" }, 400);
   if (!(await verifyHostToken(body.hostToken ?? "", code, env))) {
     return json({ error: "not the host" }, 401);
@@ -196,7 +196,7 @@ async function endRoom(request: Request, env: Env): Promise<Response> {
 
 async function joinRoom(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  const code = (url.searchParams.get("code") ?? "").toUpperCase();
+  const code = normalizeCode(url.searchParams.get("code") ?? "");
 
   if (!isValidCode(code)) return json({ error: "bad room code" }, 400);
 
@@ -221,7 +221,7 @@ async function joinRoom(request: Request, env: Env): Promise<Response> {
 
 async function upload(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  const code = (url.searchParams.get("code") ?? "").toUpperCase();
+  const code = normalizeCode(url.searchParams.get("code") ?? "");
   const token = url.searchParams.get("hostToken") ?? "";
 
   if (!isValidCode(code)) return json({ error: "bad room code" }, 400);

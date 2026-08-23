@@ -30,7 +30,22 @@ const REPORT_EVERY = 4800; // ~100 ms
  * to drive the error to zero. The correction is bounded well below audibility,
  * which is possible precisely because it never has to catch up much.
  */
-const TAU_SECONDS = 3; // erase the standing error over ~3 s
+/**
+ * Proportional gain, as a time constant: the error is erased over ~1.5 s.
+ */
+const TAU_SECONDS = 1.5;
+/**
+ * Integral gain, and the reason transients can be tight at all.
+ *
+ * A proportional-only controller CANNOT drive a constant disturbance to zero
+ * -- it needs a standing error to produce the very correction that cancels it.
+ * A crystal offset is exactly such a disturbance, so every device settled at a
+ * small but different residue, and a sharp beat exposed the difference between
+ * them even while each looked converged. The integral term accumulates that
+ * residue and removes it: the steady-state error goes to zero rather than to
+ * "small", and the rate converges on the true crystal ratio.
+ */
+const TAU_INTEGRAL_SECONDS = 8;
 
 /**
  * Two correction ceilings.
@@ -66,6 +81,8 @@ class LiveProcessor extends AudioWorkletProcessor {
     /** Fractional read position in ring-index space, and its current rate. */
     this.readPos = 0;
     this.rate = 1;
+    /** Accumulated error, in frame-seconds. See TAU_INTEGRAL_SECONDS. */
+    this.integral = 0;
     this.started = false;
     this.resyncs = 0;
     /** Latest sync point from the main thread: at output frame F, play ring W. */
@@ -140,14 +157,29 @@ class LiveProcessor extends AudioWorkletProcessor {
     return this.syncW + (f - this.syncF);
   }
 
-  /** One interpolated frame from channel `c` at fractional ring position. */
+  /**
+   * One frame from channel `c` at a fractional ring position, Catmull-Rom.
+   *
+   * Linear interpolation is a lowpass filter whose corner depends on the
+   * fractional offset, so two devices sitting at different offsets round a
+   * sharp transient differently -- a rimshot arrives with subtly different
+   * attack on each, which the ear reads as looseness even when the timing is
+   * right. A four-point cubic keeps the top octave intact for a few extra
+   * multiplies per sample.
+   */
   sample(c, pos) {
     const base = Math.floor(pos);
-    const frac = pos - base;
+    const t = pos - base;
     const ring = this.ring[c];
-    const a = ring[base & MASK];
-    const b = ring[(base + 1) & MASK];
-    return a + (b - a) * frac;
+    const p0 = ring[(base - 1) & MASK];
+    const p1 = ring[base & MASK];
+    const p2 = ring[(base + 1) & MASK];
+    const p3 = ring[(base + 2) & MASK];
+    const a = 2 * p1;
+    const b = p2 - p0;
+    const d = 2 * p0 - 5 * p1 + 4 * p2 - p3;
+    const e = -p0 + 3 * p1 - 3 * p2 + p3;
+    return 0.5 * (a + b * t + d * t * t + e * t * t * t);
   }
 
   process(_inputs, outputs) {
@@ -165,6 +197,7 @@ class LiveProcessor extends AudioWorkletProcessor {
     if (!this.started) {
       this.readPos = this.target(base);
       this.rate = 1;
+      this.integral = 0;
       this.started = true;
     }
 
@@ -176,20 +209,34 @@ class LiveProcessor extends AudioWorkletProcessor {
     if (Math.abs(err) > HARD_RESYNC_FRAMES) {
       this.readPos = this.target(base);
       this.rate = 1;
+      this.integral = 0;
       this.resyncs++;
     } else {
-      const correction = -err / (TAU_SECONDS * sampleRate);
       const ceiling =
         Math.abs(err) > RECOVERY_THRESHOLD_FRAMES
           ? RECOVERY_RATE_DEVIATION
           : MAX_RATE_DEVIATION;
-      this.rate = 1 + Math.max(-ceiling, Math.min(ceiling, correction));
+
+      const dt = frames / sampleRate;
+      const proportional = -err / (TAU_SECONDS * sampleRate);
+      // Anti-windup: an integrator allowed to grow past what the rate limit
+      // can express would keep pushing long after the error was gone, and
+      // overshoot. Bound it to exactly the authority available.
+      const integralLimit = ceiling * TAU_INTEGRAL_SECONDS * sampleRate;
+      this.integral = Math.max(
+        -integralLimit,
+        Math.min(integralLimit, this.integral - err * dt),
+      );
+      const integral = this.integral / (TAU_INTEGRAL_SECONDS * sampleRate);
+
+      this.rate = 1 + Math.max(-ceiling, Math.min(ceiling, proportional + integral));
     }
 
     let missing = 0;
     let pos = this.readPos;
     for (let i = 0; i < frames; i++) {
-      const inWindow = pos >= this.from && pos + 1 < this.upTo;
+      // Cubic needs one sample either side of the pair it interpolates.
+      const inWindow = pos - 1 >= this.from && pos + 2 < this.upTo;
       for (let c = 0; c < out.length; c++) {
         const ch = Math.min(c, this.channels - 1);
         out[c][i] = inWindow ? this.sample(ch, pos) : 0;

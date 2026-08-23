@@ -32,6 +32,31 @@ final class RingBuffer: @unchecked Sendable {
 
     var framesWritten: Int64 { written.load(ordering: .acquiring) }
 
+    /**
+     Advance the write position by `frames` of silence.
+
+     Swapping capture sources takes a moment, and during it nothing is written.
+     Left alone the stream would simply resume where it stopped, so every
+     sample after the swap would be that much later than the clock says it
+     should be -- the whole room would slide behind. Padding the gap keeps
+     stream position and wall clock the same thing.
+     */
+    func writeSilence(frames: Int) {
+        guard frames > 0 else { return }
+        let start = written.load(ordering: .relaxed)
+        let mask = capacity - 1
+        var offset = Int(start) & mask
+        var remaining = frames
+        while remaining > 0 {
+            let chunk = min(remaining, capacity - offset)
+            storage.advanced(by: offset * channels)
+                .update(repeating: 0, count: chunk * channels)
+            offset = (offset + chunk) & mask
+            remaining -= chunk
+        }
+        written.store(start + Int64(frames), ordering: .releasing)
+    }
+
     /// Append `frames` of interleaved audio. Called from the capture thread only.
     func write(_ src: UnsafePointer<Float>, frames: Int) {
         guard frames > 0 else { return }

@@ -1,8 +1,12 @@
 import { useState } from "react";
 import { CODE_LENGTH } from "../../shared/protocol";
+import { lastRoom } from "../lib/device";
+import { normalizeCode } from "../../shared/code";
 
 export function Landing({ onEnter }: { onEnter: (code: string, hostToken: string | null) => void }) {
   const [code, setCode] = useState("");
+  // A phone that was in a room today should get back in with one tap.
+  const [previous] = useState(lastRoom);
   const [pass, setPass] = useState("");
   const [hosting, setHosting] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -49,6 +53,19 @@ export function Landing({ onEnter }: { onEnter: (code: string, hostToken: string
 
       {!hosting ? (
         <div className="rise" style={{ animationDelay: "220ms" }}>
+          {previous && (
+            <button
+              onClick={() => onEnter(previous.code, null)}
+              className="mb-6 w-full rounded-xl border border-pulse/40 bg-pulse/10 px-5 py-4 text-left transition-colors hover:bg-pulse/15"
+            >
+              <span className="block text-[10px] uppercase tracking-[0.28em] text-muted">
+                Zurück in den Raum
+              </span>
+              <span className="num mt-1 block text-2xl tracking-[0.3em] text-pulse">
+                {previous.code}
+              </span>
+            </button>
+          )}
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -62,9 +79,8 @@ export function Landing({ onEnter }: { onEnter: (code: string, hostToken: string
               value={code}
               onChange={(e) =>
                 setCode(
-                  e.target.value
-                    .toUpperCase()
-                    .replace(/[^0-9A-HJ-KM-NP-TV-Z]/g, "")
+                  normalizeCode(e.target.value)
+                    .replace(/[^0-9A-HJKMNP-TV-Z]/g, "")
                     .slice(0, CODE_LENGTH),
                 )
               }

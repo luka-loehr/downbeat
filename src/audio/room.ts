@@ -8,7 +8,7 @@ import type {
 import { PROTOCOL_VERSION } from "../shared/protocol";
 import { SyncedClock, type ClockStats } from "./clock";
 import { PlaybackEngine, LivePlayer, type EngineStatus, type LiveStats } from "./engine";
-import { unlockAudio } from "./latency";
+import { claimPlaybackAudioSession, unlockAudio } from "./latency";
 
 export interface RoomSnapshot {
   connected: boolean;
@@ -42,6 +42,7 @@ export class RoomConnection {
   private closedByUs = false;
   private attempt = 0;
 
+  private visibilityHooked = false;
   private telemetryTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private listeners = new Set<Listener>();
@@ -88,6 +89,18 @@ export class RoomConnection {
     }
     this.closedByUs = false;
     this.open();
+
+    // Coming back to a backgrounded tab is when the context is most likely to
+    // have been suspended, and it is also exactly when the user expects sound.
+    if (!this.visibilityHooked) {
+      this.visibilityHooked = true;
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState !== "visible") return;
+        void this.wake();
+        // A socket dropped while backgrounded will not have retried yet.
+        if (!this.connected && !this.closedByUs) this.open();
+      });
+    }
   }
 
   stop(): void {
@@ -163,6 +176,8 @@ export class RoomConnection {
 
   private scheduleReconnect(): void {
     if (this.reconnectTimer !== null) return;
+    // Backoff, but never past a few seconds: this has to recover on its own
+    // while the phone is in someone's pocket, with nobody there to retry.
     const delay = Math.min(RECONNECT_BASE_MS * 2 ** this.attempt, RECONNECT_MAX_MS);
     this.attempt++;
     this.reconnectTimer = setTimeout(() => {
@@ -253,11 +268,34 @@ export class RoomConnection {
     }
   }
 
+  /**
+   * Keep the audio graph awake.
+   *
+   * A context that has been silent -- a host restarting, a phone backgrounded,
+   * a screen locked -- gets suspended by the system, and nothing plays again
+   * until something resumes it. That is why a handover appeared to need a page
+   * reload: the protocol had already recovered, but the audio hardware had
+   * been put to sleep underneath it.
+   */
+  private async wake(): Promise<void> {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    if (ctx.state === "suspended") {
+      try {
+        await ctx.resume();
+      } catch {
+        /* needs a gesture; the join tap already provided one */
+      }
+    }
+    claimPlaybackAudioSession();
+  }
+
   /** Start or stop live playback to match what the room says is happening. */
   private async applyLive(live: import("../shared/protocol").LiveState | null): Promise<void> {
     if (!this.live) return;
     if (live?.active) {
       this.engine?.pause();
+      await this.wake();
       try {
         await this.live.start({
           sampleRate: live.sampleRate,

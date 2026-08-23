@@ -36,6 +36,17 @@ final class LocalPlayer {
     private(set) var reanchors: Int = 0
 
     /**
+     Output level for this Mac only, 0...1.
+
+     Muting the host is a listening decision, not a transport one: the capture,
+     the encode and every phone in the room carry on untouched. Read from the
+     realtime IO proc and written from the control thread, so it is a plain
+     Double behind atomic-width access rather than anything that could block
+     the audio thread.
+     */
+    nonisolated(unsafe) var gain: Double = 1
+
+    /**
      Read position, advanced by exactly the frames consumed.
 
      Recomputing it from the clock on every callback sounds equivalent and is
@@ -113,7 +124,8 @@ final class LocalPlayer {
             self.readFrame += Int64(n)
             if got < n { self.starvedFrames += (n - got) }
 
-            Self.scatter(self.scratch, frames: n, sourceChannels: chans, into: out)
+            Self.scatter(self.scratch, frames: n, sourceChannels: chans,
+                         gain: Float(self.gain), into: out)
         }
         guard ioStatus == noErr, let procID else { throw PlayerError.ioProcFailed(ioStatus) }
 
@@ -141,7 +153,7 @@ final class LocalPlayer {
      per channel, and both are common. Handle both rather than assuming.
      */
     private static func scatter(_ src: UnsafePointer<Float>, frames: Int,
-                                sourceChannels: Int,
+                                sourceChannels: Int, gain: Float,
                                 into out: UnsafeMutableAudioBufferListPointer) {
         if out.count == 1 {
             guard let d = out[0].mData else { return }
@@ -149,7 +161,8 @@ final class LocalPlayer {
             let p = d.bindMemory(to: Float.self, capacity: frames * dstChannels)
             for f in 0..<frames {
                 for c in 0..<dstChannels {
-                    p[f * dstChannels + c] = src[f * sourceChannels + min(c, sourceChannels - 1)]
+                    p[f * dstChannels + c] =
+                        src[f * sourceChannels + min(c, sourceChannels - 1)] * gain
                 }
             }
         } else {
@@ -157,7 +170,7 @@ final class LocalPlayer {
                 guard let d = buf.mData else { continue }
                 let p = d.bindMemory(to: Float.self, capacity: frames)
                 let sc = min(c, sourceChannels - 1)
-                for f in 0..<frames { p[f] = src[f * sourceChannels + sc] }
+                for f in 0..<frames { p[f] = src[f * sourceChannels + sc] * gain }
             }
         }
     }

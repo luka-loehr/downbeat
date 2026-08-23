@@ -53,6 +53,10 @@ export interface StatusEvent {
   reanchors: number;
   listeners: number;
   uptimeSec: number;
+  /** Output level for the host Mac only, 0...1. */
+  localGain: number;
+  /** Which app is being captured right now. */
+  source: string;
   /** dBFS per ~10 ms of capture since the last status, oldest first. */
   levels?: number[];
 }
@@ -60,6 +64,29 @@ export interface StatusEvent {
 export interface ListenersEvent {
   t: "listeners";
   count: number;
+}
+
+export interface SourcesEvent {
+  t: "sources";
+  current: string;
+  list: Array<{ pid: number; name: string; active: boolean }>;
+}
+
+export interface SourceEvent {
+  t: "source";
+  label: string;
+  pid: number;
+}
+
+export interface LocalEvent {
+  t: "local";
+  gain: number;
+}
+
+export interface LinkEvent {
+  t: "link";
+  up: boolean;
+  reason: string;
 }
 
 export interface LogEvent {
@@ -74,6 +101,10 @@ export type CoreEvent =
   | MembersEvent
   | StatusEvent
   | ListenersEvent
+  | SourcesEvent
+  | SourceEvent
+  | LocalEvent
+  | LinkEvent
   | LogEvent;
 
 /**

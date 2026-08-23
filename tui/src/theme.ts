@@ -7,24 +7,56 @@
  * white" that turns out to be "slate on cream" is a QR code no phone will
  * read.
  */
+/**
+ * Monochrome, and deliberately so.
+ *
+ * Almost nothing here names a colour. A terminal's foreground is already
+ * legible against its own background -- that is the one thing a user has
+ * definitely configured -- so hierarchy is carried by weight and dimming
+ * instead: bold for what matters, dim for chrome, inverse for a highlight.
+ * The result reads correctly on a black terminal, a white one, and every
+ * solarized variant in between, which no fixed palette can do.
+ *
+ * `undefined` means "whatever the terminal's foreground is". Ink omits the
+ * escape entirely, which is exactly what adapts.
+ */
+/**
+ * Monochrome, and deliberately so.
+ *
+ * Almost every entry here is `undefined`, which makes Ink omit the colour
+ * escape entirely and leave the terminal's own foreground in place. That is
+ * the one colour a user has definitely configured to be legible against their
+ * own background, so it reads correctly on a black terminal, a white one, and
+ * every solarized variant in between -- which no fixed palette can do.
+ *
+ * Meaning that used to be carried by hue is carried by weight instead: bold
+ * for what matters, `dimColor` for chrome, inverse for a highlight, and the
+ * glyphs in `G` for state.
+ */
+type Ink = string | undefined;
+
 export const C = {
-  /** The needle. Transport, brand, the downbeat itself. */
-  pulse: "#ff5f1f",
-  pulseLow: "#7d3413",
-  /** Locked to the room clock. */
-  lock: "#3ef2a0",
-  lockLow: "#1d7a51",
-  warn: "#ffc94d",
-  alarm: "#ff4d5e",
+  ink: undefined as Ink,
+  muted: undefined as Ink,
+  dim: undefined as Ink,
+  rule: undefined as Ink,
+  panel: undefined as Ink,
+  void: undefined as Ink,
 
-  ink: "#f2efe9",
-  muted: "#8b879b",
-  dim: "#56526a",
-  rule: "#332f45",
+  // Kept so call sites read meaningfully; all resolve to the terminal default.
+  pulse: undefined as Ink,
+  pulseLow: undefined as Ink,
+  lock: undefined as Ink,
+  lockLow: undefined as Ink,
+  warn: undefined as Ink,
+  alarm: undefined as Ink,
 
-  panel: "#16151f",
-  void: "#08070c",
-
+  /**
+   * The two exceptions, and they are not decoration: a scanner needs real
+   * black modules on a real white field. Named ANSI colours get remapped by
+   * the user's theme -- "black on white" that resolves to slate on cream is a
+   * code no phone will read -- so these are stated as hex.
+   */
   black: "#000000",
   white: "#ffffff",
 } as const;

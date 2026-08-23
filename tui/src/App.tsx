@@ -21,13 +21,19 @@ import type {
   CoreEvent,
   Member,
   RoomEvent,
+  SourcesEvent,
   StatusEvent,
 } from "./events.js";
+
+/** Commands the UI can send back to the capture engine. */
+export type Command = Record<string, unknown>;
 
 export interface AppProps {
   subscribe: (listener: (event: CoreEvent) => void) => () => void;
   onQuit: () => void;
   coreExited: { code: number | null; reason: string } | null;
+  /** Send a runtime command to the engine; no-op once it has exited. */
+  send: (command: Command) => void;
 }
 
 /** Log lines kept in memory; the panel shows as many as it has rows for. */
@@ -41,7 +47,7 @@ const PRIMED_SEC = 2.5;
 /** How long a starve or a re-anchor keeps the session marked as degraded. */
 const ALERT_MS = 4000;
 
-export function App({ subscribe, onQuit, coreExited }: AppProps) {
+export function App({ subscribe, onQuit, coreExited, send }: AppProps) {
   const { exit } = useApp();
   const size = useTerminalSize();
   const { isRawModeSupported } = useStdin();
@@ -52,6 +58,8 @@ export function App({ subscribe, onQuit, coreExited }: AppProps) {
   const [members, setMembers] = useState<Member[]>([]);
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [stopping, setStopping] = useState(false);
+  const [sources, setSources] = useState<SourcesEvent["list"]>([]);
+  const [picking, setPicking] = useState(false);
 
   // The waveform is appended to, never rebuilt: at five events a second a new
   // array per frame would be the most expensive thing the UI does, and React
@@ -73,6 +81,9 @@ export function App({ subscribe, onQuit, coreExited }: AppProps) {
           setMembers(event.list ?? []);
           break;
         case "listeners":
+          break;
+        case "sources":
+          setSources(event.list ?? []);
           break;
         case "status": {
           pushLevels(levels.current, event.levels);
@@ -98,9 +109,52 @@ export function App({ subscribe, onQuit, coreExited }: AppProps) {
 
   useInput(
     (input, key) => {
-      if (input === "q" || input === "Q" || (key.ctrl && input === "c")) {
+      const k = input.toLowerCase();
+
+      if (k === "q" || (key.ctrl && input === "c")) {
         setStopping(true);
         onQuit();
+        return;
+      }
+
+      // Muting the host is a listening decision, not a transport one: the
+      // capture, the encode and every phone carry on untouched.
+      if (k === "m") {
+        const next = (status?.localGain ?? 1) > 0 ? 0 : 1;
+        send({ c: "localGain", v: next });
+        return;
+      }
+      if (input === "+" || input === "=") {
+        send({ c: "localGain", v: Math.min(1, (status?.localGain ?? 1) + 0.1) });
+        return;
+      }
+      if (input === "-" || input === "_") {
+        send({ c: "localGain", v: Math.max(0, (status?.localGain ?? 1) - 0.1) });
+        return;
+      }
+
+      // Source picking. `s` opens the list; a digit chooses; escape closes.
+      if (k === "s") {
+        send({ c: "sources" });
+        setPicking((p) => !p);
+        return;
+      }
+      if (picking) {
+        if (key.escape) {
+          setPicking(false);
+          return;
+        }
+        if (k === "a") {
+          send({ c: "source", mode: "system" });
+          setPicking(false);
+          return;
+        }
+        const index = Number.parseInt(input, 10);
+        if (Number.isInteger(index) && index >= 1 && index <= sources.length) {
+          const chosen = sources[index - 1];
+          send({ c: "source", pid: chosen.pid, label: chosen.name });
+          setPicking(false);
+        }
       }
     },
     { isActive: Boolean(isRawModeSupported) },
@@ -127,12 +181,21 @@ export function App({ subscribe, onQuit, coreExited }: AppProps) {
       <Header layout={layout} config={config} phase={phase} status={status} members={members} />
       <Box paddingX={1} height={layout.contentH} overflow="hidden">
         {layout.stacked ? (
-          <Stacked layout={layout} room={room} config={config} status={status} members={members} logs={logs} levels={levels.current} phase={phase} />
+          <Stacked layout={layout} room={room} config={config} status={status} members={members} logs={logs} levels={levels.current} phase={phase} picking={picking} sources={sources} />
         ) : (
-          <Wide layout={layout} room={room} config={config} status={status} members={members} logs={logs} levels={levels.current} phase={phase} />
+          <Wide layout={layout} room={room} config={config} status={status} members={members} logs={logs} levels={levels.current} phase={phase} picking={picking} sources={sources} />
         )}
       </Box>
-      <Footer layout={layout} phase={phase} room={room} stopping={stopping} coreExited={coreExited} />
+      <Footer
+        layout={layout}
+        phase={phase}
+        room={room}
+        stopping={stopping}
+        coreExited={coreExited}
+        muted={(status?.localGain ?? 1) === 0}
+        gain={status?.localGain ?? 1}
+        source={status?.source ?? config?.source ?? null}
+      />
     </Box>
   );
 }
@@ -148,6 +211,9 @@ interface BodyProps {
   logs: LogLine[];
   levels: number[];
   phase: Phase;
+  /** True while the source picker has borrowed the log panel. */
+  picking: boolean;
+  sources: SourcesEvent["list"];
 }
 
 function Wide(props: BodyProps) {
@@ -197,7 +263,7 @@ function Stacked(props: BodyProps) {
  * sections that survived the layout's budget.
  */
 function sections(props: BodyProps, width: number): ReactNode {
-  const { layout, status, members, logs, levels, phase } = props;
+  const { layout, status, members, logs, levels, phase, picking, sources } = props;
   const blocks: ReactNode[] = [];
 
   if (layout.scope > 0) {
@@ -237,8 +303,12 @@ function sections(props: BodyProps, width: number): ReactNode {
   if (layout.log > 0) {
     blocks.push(
       <Box flexDirection="column" key="log">
-        <Rule title="Protokoll" width={width} />
-        <LogView lines={logs} width={width} rows={layout.log} />
+        <Rule title={picking ? "Quelle" : "Protokoll"} width={width} />
+        {picking ? (
+          <SourcePicker sources={sources} current={status?.source ?? null} width={width} />
+        ) : (
+          <LogView lines={logs} width={width} rows={layout.log} />
+        )}
       </Box>,
     );
   }
@@ -341,7 +411,7 @@ function Header({
   const source = config ? `${config.source}${config.offline ? " · offline" : ""}` : "startet…";
 
   return (
-    <Box width={layout.cols} backgroundColor={C.panel} paddingX={1} justifyContent="space-between">
+    <Box width={layout.cols} paddingX={1} justifyContent="space-between">
       <Text wrap="truncate-end">
         <Text color={C.pulse} bold>
           {brand}
@@ -372,33 +442,87 @@ function Footer({
   room,
   stopping,
   coreExited,
+  muted,
+  gain,
+  source,
 }: {
   layout: Layout;
   phase: Phase;
   room: RoomEvent | null;
   stopping: boolean;
   coreExited: { code: number | null; reason: string } | null;
+  muted: boolean;
+  gain: number;
+  source: string | null;
 }) {
   const note = coreExited
     ? `Kern beendet ${G.dot} ${coreExited.reason}`
     : stopping
       ? "wird beendet, Quelle wird wieder hörbar…"
       : (phase.note ?? room?.url ?? "");
-  const color = coreExited ? C.alarm : stopping ? C.warn : (phase.noteColor ?? C.dim);
-  const keys = "q  beenden";
-  const space = layout.cols - 2 - keys.length - 3;
+
+  // Keys first: they are the only thing here the reader can act on.
+  const keys: Array<[string, string]> = [
+    ["q", "beenden"],
+    ["m", muted ? "laut" : "stumm"],
+    ["s", "quelle"],
+    ["±", `${Math.round(gain * 100)}%`],
+  ];
+  const keyWidth = keys.reduce((n, [k, l]) => n + k.length + l.length + 3, 0);
+  const space = layout.cols - 2 - keyWidth - 2;
 
   return (
     <Box width={layout.cols} paddingX={1} justifyContent="space-between">
       <Text wrap="truncate-end">
-        <Text color={C.muted} bold>
-          q
-        </Text>
-        <Text color={C.dim}>{"  beenden"}</Text>
+        {keys.map(([key, label], i) => (
+          <Text key={key}>
+            {i > 0 ? "  " : ""}
+            <Text bold>{key}</Text>
+            <Text dimColor>{" " + label}</Text>
+          </Text>
+        ))}
       </Text>
-      <Text color={color} wrap="truncate-end">
-        {truncate(note, Math.max(0, space))}
+      <Text dimColor={!muted} bold={muted} wrap="truncate-end">
+        {truncate(muted ? `${G.stop} Mac stumm ${G.dot} ${note}` : (source ? `${source} ${G.dot} ${note}` : note),
+                  Math.max(0, space))}
       </Text>
+    </Box>
+  );
+}
+
+/**
+ * The source picker, opened with `s`.
+ *
+ * Overlaid on the log rather than in a panel of its own: it is transient, and
+ * a layout that reflows every time someone glances at the source list is worse
+ * than one that briefly borrows a panel.
+ */
+function SourcePicker({
+  sources,
+  current,
+  width,
+}: {
+  sources: SourcesEvent["list"];
+  current: string | null;
+  width: number;
+}) {
+  return (
+    <Box flexDirection="column" width={width}>
+      <Text bold>{"QUELLE WÄHLEN"}</Text>
+      <Text dimColor>{`a  alles was der Mac abspielt${current ? `   (jetzt: ${current})` : ""}`}</Text>
+      {sources.length === 0 ? (
+        <Text dimColor>{"  keine App gefunden — spielt gerade etwas?"}</Text>
+      ) : (
+        sources.slice(0, 8).map((src, i) => (
+          <Text key={src.pid}>
+            <Text bold>{String(i + 1)}</Text>
+            <Text dimColor>{"  "}</Text>
+            <Text bold={src.active}>{truncate(src.name, Math.max(8, width - 12))}</Text>
+            <Text dimColor>{src.active ? "  spielt" : ""}</Text>
+          </Text>
+        ))
+      )}
+      <Text dimColor>{"esc  abbrechen"}</Text>
     </Box>
   );
 }
@@ -409,9 +533,9 @@ export interface Phase {
   key: "starting" | "waiting" | "connecting" | "synced" | "degraded" | "stopping" | "exited";
   label: string;
   glyph: string;
-  color: string;
+  color: string | undefined;
   note?: string;
-  noteColor?: string;
+  noteColor?: string | undefined;
   offline: boolean;
 }
 
@@ -522,7 +646,7 @@ function telemetryStats({ status, config, phase }: BodyProps): Stat[] {
   return stats;
 }
 
-function peakColor(db: number | undefined): string {
+function peakColor(db: number | undefined): string | undefined {
   if (db === undefined) return C.dim;
   if (db > -1.5) return C.alarm;
   if (db > -6) return C.warn;

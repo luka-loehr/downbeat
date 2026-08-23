@@ -10,15 +10,31 @@ import { describe, expect, it } from "vitest";
  */
 const SAMPLE_RATE = 48000;
 const BLOCK = 128;
-const TAU_SECONDS = 3;
+const TAU_SECONDS = 1.5;
+const TAU_INTEGRAL_SECONDS = 8;
 const MAX_RATE_DEVIATION = 0.002;
 const RECOVERY_RATE_DEVIATION = 0.01;
 const RECOVERY_THRESHOLD_FRAMES = SAMPLE_RATE * 0.02;
 
+/** The PI law from public/live-processor.js, as a closure over its state. */
+function controller() {
+  let integral = 0;
+  return (err: number, dt: number) => {
+    const ceiling =
+      Math.abs(err) > RECOVERY_THRESHOLD_FRAMES ? RECOVERY_RATE_DEVIATION : MAX_RATE_DEVIATION;
+    const proportional = -err / (TAU_SECONDS * SAMPLE_RATE);
+    const limit = ceiling * TAU_INTEGRAL_SECONDS * SAMPLE_RATE;
+    integral = Math.max(-limit, Math.min(limit, integral - err * dt));
+    const i = integral / (TAU_INTEGRAL_SECONDS * SAMPLE_RATE);
+    return 1 + Math.max(-ceiling, Math.min(ceiling, proportional + i));
+  };
+}
+
+/** Kept for the tests that only exercise the proportional limits. */
 function steer(err: number): number {
-  const correction = -err / (TAU_SECONDS * SAMPLE_RATE);
   const ceiling =
     Math.abs(err) > RECOVERY_THRESHOLD_FRAMES ? RECOVERY_RATE_DEVIATION : MAX_RATE_DEVIATION;
+  const correction = -err / (TAU_SECONDS * SAMPLE_RATE);
   return 1 + Math.max(-ceiling, Math.min(ceiling, correction));
 }
 
@@ -28,14 +44,16 @@ function steer(err: number): number {
  */
 function simulate(ppm: number, seconds: number) {
   const blocks = Math.floor((seconds * SAMPLE_RATE) / BLOCK);
-  const settleAfter = Math.floor((30 * SAMPLE_RATE) / BLOCK);
+  const settleAfter = Math.floor((40 * SAMPLE_RATE) / BLOCK);
+  const dt = BLOCK / SAMPLE_RATE;
+  const steerPI = controller();
   let readPos = 0;
   let target = 0;
   let worst = 0;
   let last = 0;
   for (let b = 0; b < blocks; b++) {
     const err = readPos - target;
-    const rate = steer(err);
+    const rate = steerPI(err, dt);
     readPos += BLOCK * rate;
     target += BLOCK * (1 + ppm);
     last = err;
@@ -45,14 +63,28 @@ function simulate(ppm: number, seconds: number) {
 }
 
 describe("live drift controller", () => {
-  it("holds a typical 50 ppm clock difference well under a millisecond for an hour", () => {
+  /**
+   * The point of the integral term. A proportional-only controller settles at
+   * a residue proportional to the disturbance, and every device has a
+   * different crystal, so every device settles somewhere else -- which a sharp
+   * transient exposes as looseness. With the integrator the residue goes to
+   * zero, not merely to "small".
+   */
+  it("drives a typical 50 ppm difference to essentially zero, not just small", () => {
     const { worstMs } = simulate(50e-6, 3600);
-    expect(worstMs).toBeLessThan(0.5);
+    expect(worstMs).toBeLessThan(0.02);
   });
 
-  it("holds a bad 100 ppm crystal under a millisecond for an hour", () => {
+  it("drives a bad 100 ppm crystal to essentially zero", () => {
     const { worstMs } = simulate(100e-6, 3600);
-    expect(worstMs).toBeLessThan(1);
+    expect(worstMs).toBeLessThan(0.05);
+  });
+
+  it("leaves devices with opposite crystals agreeing to well under a millisecond", () => {
+    // What a listener standing between two speakers actually hears.
+    const fast = simulate(+110e-6, 1800).finalMs;
+    const slow = simulate(-90e-6, 1800).finalMs;
+    expect(Math.abs(fast - slow)).toBeLessThan(0.1);
   });
 
   it("does not let the error grow without bound, which is the old failure", () => {

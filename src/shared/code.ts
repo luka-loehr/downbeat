@@ -12,6 +12,23 @@ export function generateCode(random: (n: number) => Uint8Array = cryptoBytes): s
   return out;
 }
 
+/**
+ * Fold the glyphs people substitute when reading a code aloud or typing it.
+ *
+ * The alphabet drops I, L, O and U precisely because they are confusable, but
+ * that only helps if someone typing "O" for zero gets in rather than an error.
+ * Crockford's mapping: O is zero, I and L are one. U has no mapping -- it is
+ * excluded to keep accidental words out, not because it looks like anything.
+ */
+export function normalizeCode(input: string): string {
+  return input
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]/g, "")
+    .replace(/O/g, "0")
+    .replace(/[IL]/g, "1");
+}
+
 export function isValidCode(code: string): boolean {
   if (code.length !== CODE_LENGTH) return false;
   for (const ch of code) if (!CODE_ALPHABET.includes(ch)) return false;

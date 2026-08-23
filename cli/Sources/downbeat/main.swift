@@ -45,6 +45,8 @@ func parseOptions() -> Options {
                 o.pid = nil; o.sourceLabel = "System"
             } else if let pid = pid_t(v) {
                 o.pid = pid; o.sourceLabel = "PID \(pid)"
+            } else if let found = AudioSources.find(named: v) {
+                o.pid = found.pid; o.sourceLabel = found.name
             } else {
                 o.pid = findProcess(named: v); o.sourceLabel = v
             }
@@ -71,7 +73,8 @@ func parseOptions() -> Options {
             downbeat logout             hinterlegte Passphrase löschen
             downbeat host [Optionen]
 
-              --source <app|system|pid>  Quelle (Standard: spotify)
+              --source <app|system|pid>  Quelle: App-Name (Spotify, Music, …),
+                                         "system" für alles, oder eine PID
               --buffer <ms>              Verzögerung, Standard 2000
               --code <ABC123>            fester Raumcode statt zufällig
               --takeover                 laufende Session dieses Codes übernehmen
@@ -87,7 +90,16 @@ func parseOptions() -> Options {
         }
         i += 1
     }
-    if o.sourceLabel == "Spotify" && o.pid == nil { o.pid = findProcess(named: "Spotify") }
+    if o.sourceLabel == "Spotify" && o.pid == nil {
+        if let found = AudioSources.find(named: "Spotify") {
+            o.pid = found.pid
+        } else if let music = AudioSources.find(named: "Music") {
+            // Nothing from Spotify, but Apple Music is playing -- take that
+            // rather than refusing to start over a default nobody chose.
+            o.pid = music.pid
+            o.sourceLabel = music.name
+        }
+    }
     return o
 }
 
@@ -197,6 +209,8 @@ nonisolated(unsafe) var anchorLocalMs: Double = 0
 nonisolated(unsafe) var anchored = false
 /// Touched from the URLSession delegate queue and read by the status loop.
 let listenerCount = Atomic<Int>(0)
+/// Scratch for the clamp path; sized well beyond any device's buffer.
+nonisolated(unsafe) var clampBuffer = [Float](repeating: 0, count: 16384)
 
 // ---- room ----------------------------------------------------------------
 
@@ -226,30 +240,60 @@ if !options.offline {
 
 // ---- capture -------------------------------------------------------------
 
-do {
-    try tap.start(pid: options.pid, mute: options.mute) { @Sendable samples, frames, hostTime in
-        if !anchored {
-            anchorLocalMs = RoomClock.localMs(hostTime: hostTime)
-            anchored = true
+/**
+ The capture callback. Runs on a realtime audio thread: it may allocate
+ nothing, lock nothing that another thread holds for long, and above all never
+ block. Everything it touches is either atomic or the lock-free ring.
+ */
+@Sendable func captureCallback(_ samples: UnsafePointer<Float>, _ frames: Int, _ hostTime: UInt64) {
+    if !anchored {
+        anchorLocalMs = RoomClock.localMs(hostTime: hostTime)
+        anchored = true
+    }
+    if let p = player, !p.anchored {
+        p.anchorLocalMs = anchorLocalMs
+        p.anchored = true
+    }
+    // Capturing the whole system sums every app, and two players at once
+    // routinely exceeds full scale -- measured +6.7 dBFS with Music and
+    // Spotify together. Opus handles out-of-range samples badly, so clamp
+    // before anything downstream sees them.
+    let n = frames * 2
+    var localPeak: Float = 0
+    for i in 0..<n { let a = abs(samples[i]); if a > localPeak { localPeak = a } }
+
+    if localPeak > 1 {
+        clampBuffer.withUnsafeMutableBufferPointer { buf in
+            guard let base = buf.baseAddress, buf.count >= n else { return }
+            for i in 0..<n { base[i] = max(-1, min(1, samples[i])) }
+            ring.write(base, frames: frames)
         }
-        // The player is created after the tap, so the first callbacks may find
-        // it missing. Keep offering the anchor until it has been taken --
-        // setting it once on the wrong side of that race left the player
-        // unanchored forever, which reads as "the Mac plays nothing".
-        if let p = player, !p.anchored {
-            p.anchorLocalMs = anchorLocalMs
-            p.anchored = true
-        }
+    } else {
         ring.write(samples, frames: frames)
-        stats.lock.lock()
-        stats.captured += Int64(frames)
-        let n = frames * 2
-        var localPeak: Float = 0
-        for i in 0..<n { let a = abs(samples[i]); if a > localPeak { localPeak = a } }
-        if localPeak > stats.peak { stats.peak = localPeak }
-        stats.levels.append(localPeak)
-        if stats.levels.count > 400 { stats.levels.removeFirst(stats.levels.count - 400) }
-        stats.lock.unlock()
+    }
+
+    stats.lock.lock()
+    stats.captured += Int64(frames)
+    if localPeak > stats.peak { stats.peak = localPeak }
+    stats.levels.append(localPeak)
+    if stats.levels.count > 400 { stats.levels.removeFirst(stats.levels.count - 400) }
+    stats.lock.unlock()
+}
+
+/// Publish the apps that could be captured, so the UI can offer a picker.
+@Sendable func emitSources() {
+    let list = AudioSources.list().prefix(24)
+    let json = "[" + list.map { src in
+        let escaped = src.name.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "{\"pid\":\(src.pid),\"name\":\"\(escaped)\",\"active\":\(src.active)}"
+    }.joined(separator: ",") + "]"
+    Events.emitRaw("sources", ["current": currentLabel], jsonKey: "list", json: json)
+}
+
+do {
+    try tap.start(pid: options.pid, mute: options.mute) { @Sendable s, f, h in
+        captureCallback(s, f, h)
     }
 } catch {
     die("\(error)")
@@ -336,6 +380,80 @@ if let t = transport {
     encoderThread = thread
 }
 
+// ---- runtime source switching ---------------------------------------------
+
+/// Guards a swap against a second one arriving while the first is in flight.
+let switching = Atomic<Bool>(false)
+nonisolated(unsafe) var currentLabel = options.sourceLabel
+
+/**
+ Point the capture at a different app without interrupting the room.
+
+ The stream keeps its identity across the swap: same room, same sample
+ timeline, same listeners. Only what is being recorded changes.
+ */
+@Sendable func switchSource(pid: pid_t?, label: String) {
+    guard !switching.exchange(true, ordering: .acquiring) else { return }
+    defer { switching.store(false, ordering: .releasing) }
+
+    tap.stop()
+    // Pad the silence of the swap so stream position keeps tracking the clock.
+    if anchored {
+        let expected = Int64((RoomClock.localMs(hostTime: mach_absolute_time())
+                              - anchorLocalMs) / 1000 * 48000)
+        let behind = expected - ring.framesWritten
+        if behind > 0 { ring.writeSilence(frames: Int(min(behind, 48000 * 4))) }
+    }
+
+    do {
+        try tap.start(pid: pid, mute: options.mute) { @Sendable samples, frames, hostTime in
+            captureCallback(samples, frames, hostTime)
+        }
+        currentLabel = label
+        Events.emit(["t": "source", "label": label, "pid": Int(pid ?? 0)])
+        Events.log("info", "Quelle: \(label)")
+    } catch {
+        Events.log("error", "Quellenwechsel fehlgeschlagen: \(error)")
+        // Put the previous source back rather than leaving the room silent.
+        try? tap.start(pid: options.pid, mute: options.mute) { @Sendable s, f, h in
+            captureCallback(s, f, h)
+        }
+    }
+}
+
+// ---- runtime control ------------------------------------------------------
+
+if options.json {
+    Control.listen { command in
+        switch command["c"] as? String {
+        case "localGain":
+            if let v = command["v"] as? Double {
+                player?.gain = max(0, min(1, v))
+                Events.emit(["t": "local", "gain": player?.gain ?? 0])
+            }
+        case "source":
+            if (command["mode"] as? String) == "system" {
+                switchSource(pid: nil, label: "System")
+            } else if let pid = command["pid"] as? Int {
+                let name = command["label"] as? String
+                    ?? AudioSources.list().first { $0.pid == pid_t(pid) }?.name
+                    ?? "PID \(pid)"
+                switchSource(pid: pid_t(pid), label: name)
+            } else if let name = command["name"] as? String,
+                      let found = AudioSources.find(named: name) {
+                switchSource(pid: found.pid, label: found.name)
+            }
+        case "sources":
+            emitSources()
+        case "quit":
+            shutdown()
+            exit(0)
+        default:
+            break
+        }
+    }
+}
+
 // ---- report --------------------------------------------------------------
 
 nonisolated func shutdown() {
@@ -415,6 +533,7 @@ while true {
     let peakDb = peak > 0 ? 20 * log10(Double(peak)) : -120.0
 
     if options.json {
+        if secs % 3 == 0 { emitSources() }
         Events.emit([
             "t": "status",
             "peakDb": peakDb,
@@ -431,6 +550,8 @@ while true {
             "sendErrors": transport?.sendErrors ?? 0,
             "inFlight": transport?.inFlight ?? 0,
             "lastSendError": transport?.lastSendError ?? "",
+            "localGain": player?.gain ?? 0,
+            "source": currentLabel,
             "received": transport?.received ?? 0,
             "receiveArmed": transport?.receiveArmed ?? false,
             "uptimeSec": secs,

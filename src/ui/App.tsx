@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { Landing } from "./screens/Landing";
 import { Room } from "./screens/Room";
-import { isValidCode } from "../shared/code";
+import { isValidCode, normalizeCode } from "../shared/code";
 import { watchForNewBuild } from "./lib/version";
 
 /** Room URLs are `/r/CODE`; everything else is the landing screen. */
 function readPath(): string | null {
   const m = /^\/r\/([^/]+)/.exec(location.pathname);
   if (!m) return null;
-  const code = decodeURIComponent(m[1]).toUpperCase();
+  const code = normalizeCode(decodeURIComponent(m[1]));
   return isValidCode(code) ? code : null;
 }
 

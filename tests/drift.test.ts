@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { driftRate } from "../src/audio/engine";
-import { generateCode, isValidCode } from "../src/shared/code";
+import { generateCode, isValidCode, normalizeCode } from "../src/shared/code";
 import { CODE_LENGTH } from "../src/shared/protocol";
 
 describe("driftRate", () => {
@@ -75,5 +75,21 @@ describe("room codes", () => {
     expect(isValidCode("ABCDEFG")).toBe(false);
     expect(isValidCode("ABCDEI")).toBe(false);
     expect(isValidCode("")).toBe(false);
+  });
+});
+
+describe("code normalisation", () => {
+  it("accepts the glyphs people substitute when reading aloud", () => {
+    // The alphabet drops I, L, O and U because they are confusable; that only
+    // helps if someone who types the confusable one still gets in.
+    expect(normalizeCode("mono01")).toBe("M0N001");
+    expect(normalizeCode("hello1")).toBe("HE11 01".replace(" ", ""));
+    expect(normalizeCode(" party7 ")).toBe("PARTY7");
+    expect(normalizeCode("ab-cd12")).toBe("ABCD12");
+  });
+
+  it("produces valid codes from confusable input", () => {
+    expect(isValidCode(normalizeCode("MONO01"))).toBe(true);
+    expect(isValidCode(normalizeCode("SUNSET"))).toBe(false); // U has no mapping
   });
 });
