@@ -13,9 +13,44 @@ final class Transport: NSObject, @unchecked Sendable {
 
     private(set) var code = ""
     private(set) var hostToken = ""
-    var onOpen: (() -> Void)?
-    /// Full member list, so the host can see who is connected and how well.
-    var onMembers: (([[String: Any]]) -> Void)?
+    /// Set once the socket is open; sends are pointless before that.
+    private(set) var linked = false
+    /// Frames handed to a dead socket, i.e. audio that reached nobody.
+    private(set) var droppedFrames = 0
+    /// Sends the socket itself rejected. Ignoring these hid a dead stream
+    /// behind a healthy-looking packet counter.
+    private(set) var sendErrors = 0
+    private(set) var lastSendError = ""
+    /// Frames handed to the socket but not yet acknowledged.
+    private(set) var inFlight = 0
+    /// Messages the socket has handed us. If this stops climbing while sends
+    /// keep succeeding, the connection is half-open and the stream is going
+    /// nowhere -- which is invisible from the send side alone.
+    private(set) var received = 0
+    private(set) var receiveArmed = false
+    private var attempt = 0
+    private var reopening = false
+    var onOpen: (@Sendable () -> Void)?
+    /// Connection state changes, for the host display.
+    var onLink: (@Sendable (Bool, String) -> Void)?
+    /**
+     Member updates, as a Sendable snapshot.
+
+     These callbacks fire on the URLSession delegate queue, never on the main
+     actor. Handing a closure an `[[String: Any]]` there let the compiler infer
+     main-actor isolation for the closure body, and Swift 6 verifies that at
+     runtime: the first state broadcast after a device joined trapped the
+     process on a queue assertion. Marking the callbacks `@Sendable` and passing
+     a Sendable value makes that mistake unrepresentable rather than merely
+     unlikely.
+     */
+    struct MemberSnapshot: Sendable {
+        let count: Int
+        let spreadMs: Double
+        /// The member array, already encoded, so no dictionary crosses threads.
+        let json: String
+    }
+    var onMembers: (@Sendable (MemberSnapshot) -> Void)?
 
     init(baseURL: URL, clock: RoomClock) {
         self.baseURL = baseURL
@@ -96,6 +131,7 @@ final class Transport: NSObject, @unchecked Sendable {
         let task = session.webSocketTask(with: components.url!)
         self.task = task
         running = true
+        linked = true
         task.resume()
         receive()
 
@@ -135,16 +171,59 @@ final class Transport: NSObject, @unchecked Sendable {
     }
 
     private func receive() {
+        receiveArmed = true
         task?.receive { [weak self] result in
+            self?.receiveArmed = false
             guard let self, self.running else { return }
             switch result {
-            case .failure:
-                self.running = false
+            case .failure(let error):
+                // A dropped socket used to end the stream silently: sends kept
+                // being handed to a dead task and the packet counter kept
+                // rising, so the host looked healthy while nobody heard
+                // anything. Reconnect, and say so.
+                self.linked = false
+                self.onLink?(false, error.localizedDescription)
+                self.scheduleReopen()
             case .success(let message):
+                self.received += 1
                 if case .string(let text) = message { self.handle(text) }
                 self.receive()
             }
         }
+    }
+
+    private func scheduleReopen() {
+        guard running, !reopening else { return }
+        reopening = true
+        attempt += 1
+        let delay = min(pow(2.0, Double(attempt)) * 0.25, 8.0)
+        DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.running else { return }
+            self.reopening = false
+            self.task?.cancel()
+            self.reconnect()
+        }
+    }
+
+    /// Re-open the same room. The room code and token outlive the socket.
+    private func reconnect() {
+        var components = URLComponents(url: baseURL.appendingPathComponent("api/ws"),
+                                       resolvingAgainstBaseURL: false)!
+        components.scheme = baseURL.scheme == "http" ? "ws" : "wss"
+        components.queryItems = [
+            .init(name: "code", value: code),
+            .init(name: "role", value: "source"),
+            .init(name: "name", value: "Mac (Quelle)"),
+            .init(name: "hostToken", value: hostToken),
+        ]
+        let task = session.webSocketTask(with: components.url!)
+        self.task = task
+        task.resume()
+        receive()
+        linked = true
+        attempt = 0
+        onLink?(true, "wieder verbunden")
+        onOpen?()
     }
 
     private func handle(_ text: String) {
@@ -159,7 +238,15 @@ final class Transport: NSObject, @unchecked Sendable {
            let state = obj["state"] as? [String: Any],
            let members = state["members"] as? [[String: Any]] {
             // The source is in the member list too; the host cares about speakers.
-            onMembers?(members.filter { ($0["role"] as? String) != "source" })
+            let speakers = members.filter { ($0["role"] as? String) != "source" }
+            var spread = 0.0
+            let playouts = speakers.compactMap { $0["playoutMs"] as? Double }
+            if playouts.count > 1, let lo = playouts.min(), let hi = playouts.max() {
+                spread = hi - lo
+            }
+            let encoded = (try? JSONSerialization.data(withJSONObject: speakers))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+            onMembers?(MemberSnapshot(count: speakers.count, spreadMs: spread, json: encoded))
         }
     }
 
@@ -201,10 +288,22 @@ final class Transport: NSObject, @unchecked Sendable {
      as a crackle fifty times a second.
      */
     func sendPacket(_ packet: Data, playAtRoomMs: Double, sampleIndex: Int64) {
+        guard linked, let task else {
+            droppedFrames += 1
+            return
+        }
         var frame = Data(capacity: 16 + packet.count)
         withUnsafeBytes(of: playAtRoomMs.bitPattern.littleEndian) { frame.append(contentsOf: $0) }
         withUnsafeBytes(of: Double(sampleIndex).bitPattern.littleEndian) { frame.append(contentsOf: $0) }
         frame.append(packet)
-        task?.send(.data(frame)) { _ in }
+        inFlight += 1
+        task.send(.data(frame)) { [weak self] error in
+            guard let self else { return }
+            self.inFlight -= 1
+            if let error {
+                self.sendErrors += 1
+                self.lastSendError = error.localizedDescription
+            }
+        }
     }
 }

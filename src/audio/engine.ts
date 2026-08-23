@@ -2,6 +2,7 @@ import type { SyncedClock } from "./clock";
 import { clamp } from "./clock";
 import { loadDeviceOffset, outputLatency, saveDeviceOffset } from "./latency";
 import { LIVE_HEADER_BYTES } from "../shared/protocol";
+import { WORKLET_VERSION } from "../shared/build";
 
 /**
  * PlaybackEngine -- decode ahead of time, start on a shared instant, then hold
@@ -466,10 +467,109 @@ export interface LiveStats {
   reanchors: number;
   /** Playback rate the drift controller is currently applying. */
   rate: number;
+  /** Packets skipped while waiting for the clock to converge. */
+  waiting: number;
+}
+
+/**
+ * Opus decoding, however this browser can manage it.
+ *
+ * WebCodecs `AudioDecoder` is the fast native path, but Firefox -- and
+ * therefore Tor Browser -- does not ship it for audio, and a guest who scanned
+ * a QR code should not be told their browser is unsupported. libopus compiled
+ * to WebAssembly covers everyone else at ~200 KB, loaded only when needed.
+ */
+class OpusSource {
+  private webcodec: AudioDecoder | null = null;
+  private wasm: { decodeFrame(p: Uint8Array): { channelData: Float32Array[] } } | null = null;
+
+  private constructor(
+    readonly kind: "webcodecs" | "wasm",
+    private readonly onDecoded: (planes: Float32Array[], sampleIndex: number) => void,
+    private readonly onError: (err: unknown) => void,
+  ) {}
+
+  static async create(
+    config: LiveConfig,
+    onDecoded: (planes: Float32Array[], sampleIndex: number) => void,
+    onError: (err: unknown) => void,
+  ): Promise<OpusSource> {
+    if (typeof AudioDecoder !== "undefined") {
+      const source = new OpusSource("webcodecs", onDecoded, onError);
+      const decoder = new AudioDecoder({
+        output: (data) => {
+          try {
+            const planes: Float32Array[] = [];
+            for (let c = 0; c < data.numberOfChannels; c++) {
+              const plane = new Float32Array(data.numberOfFrames);
+              data.copyTo(plane, { planeIndex: c, format: "f32-planar" });
+              planes.push(plane);
+            }
+            onDecoded(planes, data.timestamp);
+          } finally {
+            data.close();
+          }
+        },
+        error: onError,
+      });
+      decoder.configure({
+        codec: "opus",
+        sampleRate: config.sampleRate,
+        numberOfChannels: config.channels,
+      });
+      source.webcodec = decoder;
+      return source;
+    }
+
+    const { OpusDecoder } = await import("opus-decoder");
+    const decoder = new OpusDecoder({ channels: config.channels });
+    await decoder.ready;
+    const source = new OpusSource("wasm", onDecoded, onError);
+    source.wasm = decoder as unknown as { decodeFrame(p: Uint8Array): { channelData: Float32Array[] } };
+    return source;
+  }
+
+  get usable(): boolean {
+    if (this.webcodec) return this.webcodec.state === "configured";
+    return this.wasm !== null;
+  }
+
+  decode(packet: Uint8Array, sampleIndex: number): void {
+    if (this.webcodec) {
+      this.webcodec.decode(
+        new EncodedAudioChunk({
+          type: "key", // every Opus packet stands alone
+          timestamp: sampleIndex, // carried straight through to the sink
+          data: packet,
+        }),
+      );
+      return;
+    }
+    if (!this.wasm) return;
+    try {
+      // Synchronous, so a slow frame stalls the socket handler rather than
+      // silently queueing -- which is the behaviour we want, since a device
+      // that cannot keep up should show underruns, not unbounded latency.
+      const out = this.wasm.decodeFrame(packet);
+      if (out.channelData?.length) this.onDecoded(out.channelData, sampleIndex);
+    } catch (err) {
+      this.onError(err);
+    }
+  }
+
+  close(): void {
+    try {
+      this.webcodec?.close();
+    } catch {
+      /* already closed */
+    }
+    this.webcodec = null;
+    this.wasm = null;
+  }
 }
 
 export class LivePlayer {
-  private decoder: AudioDecoder | null = null;
+  private source: OpusSource | null = null;
   private node: AudioWorkletNode | null = null;
   private config: LiveConfig | null = null;
   private moduleLoaded = false;
@@ -499,7 +599,7 @@ export class LivePlayer {
 
   private stats: LiveStats = {
     decoded: 0, late: 0, marginMs: 0, underruns: 0, aheadMs: 0,
-    anchorErrorMs: 0, reanchors: 0, rate: 1,
+    anchorErrorMs: 0, reanchors: 0, rate: 1, waiting: 0,
   };
 
   constructor(
@@ -509,16 +609,22 @@ export class LivePlayer {
     private readonly deviceOffsetMs: () => number,
   ) {}
 
+  /** Every browser we serve can decode: native where possible, WASM otherwise. */
   static get supported(): boolean {
-    return typeof AudioDecoder !== "undefined";
+    return true;
   }
 
   get running(): boolean {
-    return this.decoder !== null;
+    return this.source !== null;
   }
 
   get liveConfig(): LiveConfig | null {
     return this.config;
+  }
+
+  /** Which decoder actually got used, for the diagnostics line. */
+  get decoderKind(): string | null {
+    return this.source?.kind ?? null;
   }
 
   getStats(): LiveStats {
@@ -530,15 +636,25 @@ export class LivePlayer {
     };
   }
 
+  /**
+   * Total room-clock-to-speaker compensation this device applies, in ms.
+   *
+   * This is the number that says whether two devices agree with EACH OTHER.
+   * Their internal control error reads near zero on both even when they are
+   * audibly apart, because each is steering towards its own belief about where
+   * its speaker is. A device reporting 0 here on hardware that plainly has
+   * latency is the smoking gun for that class of fault.
+   */
+  get playoutMs(): number {
+    return outputLatency(this.ctx) * 1000 + this.anchorErrorMs;
+  }
+
   async start(config: LiveConfig): Promise<void> {
     this.stop();
-    if (!LivePlayer.supported) {
-      throw new Error("dieser Browser kann kein Opus dekodieren (Safari 26+ nötig)");
-    }
     this.config = config;
     this.stats = {
       decoded: 0, late: 0, marginMs: 0, underruns: 0, aheadMs: 0,
-      anchorErrorMs: 0, reanchors: 0, rate: 1,
+      anchorErrorMs: 0, reanchors: 0, rate: 1, waiting: 0,
     };
     this.kInit = false;
     this.anchored = false;
@@ -547,7 +663,7 @@ export class LivePlayer {
     if (!this.moduleLoaded) {
       // Fingerprinted so a cached copy from an earlier deploy can never be
       // used against newer application code.
-      await this.ctx.audioWorklet.addModule(`/live-processor.js?v=${__WORKLET_VERSION__}`);
+      await this.ctx.audioWorklet.addModule(`/live-processor.js?v=${WORKLET_VERSION}`);
       this.moduleLoaded = true;
     }
 
@@ -576,30 +692,19 @@ export class LivePlayer {
     node.connect(this.out);
     this.node = node;
 
-    const decoder = new AudioDecoder({
-      output: (data) => this.render(data),
-      error: (err) => {
+    this.source = await OpusSource.create(
+      config,
+      (planes, sampleIndex) => this.render(planes, sampleIndex),
+      (err) => {
         this.stats.late++;
         console.warn("[downbeat] decoder", err);
       },
-    });
-    decoder.configure({
-      codec: "opus",
-      sampleRate: config.sampleRate,
-      numberOfChannels: config.channels,
-    });
-    this.decoder = decoder;
+    );
   }
 
   stop(): void {
-    if (this.decoder) {
-      try {
-        this.decoder.close();
-      } catch {
-        /* already closed */
-      }
-    }
-    this.decoder = null;
+    this.source?.close();
+    this.source = null;
     if (this.node) {
       this.node.port.onmessage = null;
       this.node.disconnect();
@@ -610,8 +715,8 @@ export class LivePlayer {
 
   /** Feed one wire frame: play instant, sample index, then the Opus packet. */
   push(frame: ArrayBuffer): void {
-    const decoder = this.decoder;
-    if (!decoder || decoder.state !== "configured") return;
+    const source = this.source;
+    if (!source?.usable) return;
     if (frame.byteLength <= LIVE_HEADER_BYTES) return;
 
     const view = new DataView(frame);
@@ -624,6 +729,17 @@ export class LivePlayer {
     if (margin < -200) {
       // Far past its moment. Writing it would only stamp on newer audio.
       this.stats.late++;
+      return;
+    }
+
+    // Do not anchor on a clock that has not converged. The first probes land
+    // over the opening second, and anchoring before then fixes the stream to a
+    // position that can be hundreds of milliseconds wrong -- which only a hard
+    // resync would ever recover, and which is exactly what a device joining
+    // mid-song would experience. Waiting costs a moment of silence; not
+    // waiting costs being audibly out of step with the room.
+    if (!this.anchored && !this.clock.synced) {
+      this.stats.waiting++;
       return;
     }
 
@@ -643,14 +759,7 @@ export class LivePlayer {
     // placement of packets stays exactly contiguous.
     this.postSyncPoint();
 
-    decoder.decode(
-      new EncodedAudioChunk({
-        type: "key", // every Opus packet stands alone
-        // Carried through to render() as the placement index, not as a time.
-        timestamp: Math.round(sampleIndex),
-        data: new Uint8Array(frame, LIVE_HEADER_BYTES),
-      }),
-    );
+    source.decode(new Uint8Array(frame, LIVE_HEADER_BYTES), sampleIndex);
   }
 
   /**
@@ -664,15 +773,19 @@ export class LivePlayer {
     const node = this.node;
     if (!node || !this.anchored) return;
     const rate = this.ctx.sampleRate;
+    // Read the clock ONCE. The pair below is only meaningful if both halves
+    // describe the same instant; two reads can straddle a render quantum and
+    // inject 2.7 ms of pure noise into the controller's target.
+    const now = this.ctx.currentTime;
 
     // Room time at which the sample now leaving the graph will be heard.
-    const heardNowMs = (this.ctx.currentTime - this.k) * 1000;
+    const heardNowMs = (now - this.k) * 1000;
     const wantedSample =
       this.anchorSample + ((heardNowMs - this.anchorPlayAt) / 1000) * rate;
 
     node.port.postMessage({
       type: "sync",
-      frame: Math.round(this.ctx.currentTime * rate),
+      frame: Math.round(now * rate),
       ring: wantedSample + this.frameOffset,
     });
   }
@@ -699,30 +812,16 @@ export class LivePlayer {
     this.k += clamp(sample - this.k, -0.0002, 0.0002);
   }
 
-  private render(data: AudioData): void {
+  private render(planes: Float32Array[], sampleIndex: number): void {
     const node = this.node;
-    try {
-      if (!node) return;
-      const sampleIndex = data.timestamp; // placement index, carried through
-      const frames = data.numberOfFrames;
-      const channels = data.numberOfChannels;
+    if (!node || !planes.length) return;
 
-      const planes: Float32Array[] = [];
-      for (let c = 0; c < channels; c++) {
-        const plane = new Float32Array(frames);
-        data.copyTo(plane, { planeIndex: c, format: "f32-planar" });
-        planes.push(plane);
-      }
-
-      // Contiguous by construction: consecutive packets differ by exactly their
-      // own length, so no rounding can open a hole between them.
-      node.port.postMessage(
-        { type: "audio", startFrame: sampleIndex + this.frameOffset, planes },
-        planes.map((p) => p.buffer),
-      );
-      this.stats.decoded++;
-    } finally {
-      data.close();
-    }
+    // Contiguous by construction: consecutive packets differ by exactly their
+    // own length, so no rounding can open a hole between them.
+    node.port.postMessage(
+      { type: "audio", startFrame: sampleIndex + this.frameOffset, planes },
+      planes.map((p) => p.buffer),
+    );
+    this.stats.decoded++;
   }
 }

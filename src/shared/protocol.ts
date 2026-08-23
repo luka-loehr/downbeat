@@ -38,6 +38,18 @@ export interface Member {
   readyFor: string | null;
   /** Measured start error in ms vs. the scheduled instant; null until played. */
   startError: number | null;
+  /**
+   * The device's total room-clock-to-speaker offset in ms, as it currently
+   * believes it to be: clock offset, hardware output latency, and the drift
+   * controller's standing error combined.
+   *
+   * This is the only number that says anything about whether two devices agree
+   * with EACH OTHER. A device's internal control error can read zero on both
+   * while they are audibly apart, because each is steering towards its own idea
+   * of where the speaker is. The spread of this value across the room is the
+   * inter-device sync error, and it is what the host displays.
+   */
+  playoutMs: number | null;
 }
 
 /** `arming` = everyone is buffering; `scheduled` = deadline set, waiting for it. */
@@ -81,7 +93,13 @@ export type ClientMessage =
   /** Client has decoded `trackId` and can start on demand. */
   | { t: "ready"; trackId: string; seq: number }
   /** Client's own quality telemetry, shown on the host's device list. */
-  | { t: "telemetry"; rtt: number; sync: number; startError: number | null }
+  | {
+      t: "telemetry";
+      rtt: number;
+      sync: number;
+      startError: number | null;
+      playoutMs?: number | null;
+    }
   | { t: "cmd"; cmd: HostCommand };
 
 export type HostCommand =

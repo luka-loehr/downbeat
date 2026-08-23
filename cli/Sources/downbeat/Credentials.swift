@@ -1,62 +1,65 @@
 import Foundation
-import Security
 
 /**
- The host passphrase, kept in the macOS Keychain.
+ The host passphrase, in a file under `~/.config/downbeat`.
 
- Typing a passphrase into a shell every time is both tedious and a good way to
- leave it in `~/.zsh_history`, so `downbeat login` stores it once. It is scoped
- per server host, so a local dev instance and production do not overwrite each
- other's credentials.
+ The Keychain would be the safer store, but every read pops a system dialog
+ that has to be clicked, which makes the CLI unusable from scripts, CI, or any
+ unattended run. A 0600 file in the user's config directory is what `gh`, `aws`
+ and most other CLIs do, and it is the difference between a tool that automates
+ and one that does not.
  */
 enum Credentials {
-    private static let service = "downbeat"
+    private static var directory: URL {
+        let base = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"]
+            .map { URL(fileURLWithPath: $0) }
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config")
+        return base.appendingPathComponent("downbeat")
+    }
 
+    /// Scoped per server, so a dev instance and production do not collide.
+    private static func file(for host: String) -> URL {
+        let safe = host.replacingOccurrences(of: "/", with: "_")
+        return directory.appendingPathComponent("\(safe).passphrase")
+    }
+
+    @discardableResult
     static func save(_ passphrase: String, host: String) -> Bool {
-        delete(host: host)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: host,
-            kSecValueData as String: Data(passphrase.utf8),
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked,
-        ]
-        return SecItemAdd(query as CFDictionary, nil) == errSecSuccess
+        do {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+            let target = file(for: host)
+            try Data(passphrase.utf8).write(to: target, options: [.atomic])
+            try FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                                  ofItemAtPath: target.path)
+            return true
+        } catch {
+            return false
+        }
     }
 
     static func load(host: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: host,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data,
-              let text = String(data: data, encoding: .utf8), !text.isEmpty
+        guard let data = try? Data(contentsOf: file(for: host)),
+              let text = String(data: data, encoding: .utf8)?
+                  .trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty
         else { return nil }
         return text
     }
 
     @discardableResult
     static func delete(host: String) -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: host,
-        ]
-        return SecItemDelete(query as CFDictionary) == errSecSuccess
+        (try? FileManager.default.removeItem(at: file(for: host))) != nil
     }
 
-    /**
-     Reads without echoing, so the passphrase never lands in the scrollback.
+    static var location: String {
+        directory.path.replacingOccurrences(
+            of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~")
+    }
 
-     When stdin is not a terminal -- a pipe, CI, a test -- `getpass` cannot work
-     because it reads from /dev/tty, so fall back to a plain line. That also
-     makes `echo "$SECRET" | downbeat login` a legitimate way to script setup.
-     */
+    /// Reads without echoing where there is a terminal, and from a pipe where
+    /// there is not -- so `echo "$SECRET" | downbeat login` works in scripts.
     static func prompt(_ message: String) -> String? {
         let text: String?
         if isatty(STDIN_FILENO) == 1 {

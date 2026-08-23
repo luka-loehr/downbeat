@@ -1,5 +1,6 @@
 import { RoomDO } from "./room-do";
 import { generateCode, isValidCode } from "../shared/code";
+import { BUILD_ID } from "../shared/build";
 import { CODE_ALPHABET, CODE_LENGTH } from "../shared/protocol";
 import type { Track } from "../shared/protocol";
 
@@ -29,7 +30,16 @@ export default {
 
     try {
       if (pathname === "/api/health") {
-        return json({ ok: true, service: "downbeat" });
+        // BUILD_ID is injected at build time; open tabs compare against it.
+        return new Response(
+          JSON.stringify({ ok: true, service: "downbeat", build: BUILD_ID }),
+          {
+            headers: {
+              "content-type": "application/json; charset=utf-8",
+              "cache-control": "no-store",
+            },
+          },
+        );
       }
 
       if (pathname === "/api/rooms" && request.method === "POST") {

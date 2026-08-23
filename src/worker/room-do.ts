@@ -31,6 +31,7 @@ interface Attach {
   sync: number;
   readyFor: string | null;
   startError: number | null;
+  playoutMs: number | null;
 }
 
 const EMPTY: Persisted = {
@@ -98,6 +99,7 @@ export class RoomDO implements DurableObject {
       sync: 0,
       readyFor: null,
       startError: null,
+      playoutMs: null,
     };
     server.serializeAttachment(attach);
 
@@ -156,6 +158,7 @@ export class RoomDO implements DurableObject {
         a.rtt = msg.rtt;
         a.sync = msg.sync;
         a.startError = msg.startError;
+        a.playoutMs = msg.playoutMs ?? null;
         ws.serializeAttachment(a);
         this.broadcastState();
         return;

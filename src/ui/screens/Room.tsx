@@ -59,6 +59,10 @@ export function Room({ code, hostToken }: { code: string; hostToken: string | nu
   const live = st?.live?.active ? st.live : null;
   const isHost = snap.role === "host";
 
+  // Tells the version watcher to hold off; see watchForNewBuild.
+  document.body.dataset.playing =
+    live || st?.mode === "playing" || st?.mode === "scheduled" ? "1" : "0";
+
   return (
     <main className="mx-auto flex min-h-full w-full max-w-md flex-col px-5 pb-10 pt-6 sm:max-w-xl">
       <header className="flex items-center justify-between">

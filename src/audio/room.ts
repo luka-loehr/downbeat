@@ -267,6 +267,7 @@ export class RoomConnection {
         });
       } catch (err) {
         this.error = err instanceof Error ? err.message : "Live-Wiedergabe nicht möglich";
+        console.error("[downbeat] live start", err);
       }
     } else {
       this.live.stop();
@@ -285,6 +286,11 @@ export class RoomConnection {
       rtt: Math.round(stats.rtt),
       sync: Math.round(stats.uncertainty * 10) / 10,
       startError: this.engine?.status().startErrorMs ?? null,
+      // What this device believes about its own room-clock-to-speaker offset.
+      // The spread of this across the room is the inter-device sync error.
+      playoutMs: this.live?.running
+        ? Math.round(this.live.playoutMs * 10) / 10
+        : null,
     });
   }
 

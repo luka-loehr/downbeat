@@ -21,18 +21,22 @@ Karlsruhe (Cloudflare VIE edge), 2026-08-23.
 | what | measured |
 | --- | ---: |
 | Room-clock uncertainty, browser (40 probes) | **±4.5 ms** |
-| Room-clock uncertainty, CLI (steady state) | **±8.2 ms** |
-| Distinct start instants across 3 clients | **1** |
-| Live stream, gaps in 425 packets | **0** |
-| Live stream, packets arriving late | **0** |
-| Live stream, median lead over deadline | **1868 ms** |
+| Room-clock spread ACROSS three devices | **2.8–3.6 ms** |
+| Inter-device playout spread, 4 min, ±110 ppm crystals | **5.3 ms median, 5.9 ms max** |
+| ... and whether it accumulates (first half → second half) | **5.79 ms → 5.94 ms** |
+| Live stream over 4 min, packets late | **0 of 11 980** |
+| Distinct start instants across 3 clients (file mode) | **1** |
 | Opus packet rate / bitrate | **50 /s · ~110 kbit/s** |
-| Drift controller, 100 ppm crystal error | **< 1 ms sustained** |
+| Drift controller, 100 ppm crystal, simulated hour | **< 1 ms** |
 
 > **Status: working, v0.1.0.** File playback and live capture both run end to
-> end. Sync quality is confirmed by ear by the author across several phones;
-> a calibrated acoustic measurement across devices has **not** been taken, so
-> the figures above describe the timing pipeline, not the air in the room.
+> end. The inter-device figures come from three virtual clients running the
+> real clock estimator and the real control law against the deployed server and
+> a real capture source; the clock numbers are shared with the browser, while
+> the rest carries some jitter from the harness, whose loop is a JS timer
+> rather than an audio clock. A calibrated acoustic measurement across physical
+> devices has **not** been taken, so these describe the timing pipeline, not
+> the air in the room -- where 34 cm of distance is already a millisecond.
 
 ## 2. System
 
@@ -176,6 +180,10 @@ unconditionally continuous.
 - **No per-device latency slider in the player.** Timing is the engine's job.
   The per-device offset still exists in the engine, at zero, as the hook
   Bluetooth speakers will need.
+- **No claim of perfect synchronisation.** Sound travels 34 cm per millisecond,
+  so two speakers three metres apart are ~9 ms apart at any listener no matter
+  what the software does. Downbeat removes the software error; the room is the
+  room.
 
 ## 7. Development
 

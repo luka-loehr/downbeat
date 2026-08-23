@@ -21,7 +21,8 @@ final class ProcessTap {
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var procID: AudioDeviceIOProcID?
-    private var onAudio: ((UnsafePointer<Float>, Int, UInt64) -> Void)?
+    /// Runs on a realtime audio thread; must never be main-actor isolated.
+    private var onAudio: (@Sendable (UnsafePointer<Float>, Int, UInt64) -> Void)?
 
     enum TapError: Error, CustomStringConvertible {
         case processNotFound(pid_t)
@@ -58,7 +59,7 @@ final class ProcessTap {
 
     /// `pid == nil` taps everything the machine plays.
     func start(pid: pid_t?, mute: Bool,
-               onAudio: @escaping (UnsafePointer<Float>, Int, UInt64) -> Void) throws {
+               onAudio: @escaping @Sendable (UnsafePointer<Float>, Int, UInt64) -> Void) throws {
         self.onAudio = onAudio
 
         let description: CATapDescription

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Landing } from "./screens/Landing";
 import { Room } from "./screens/Room";
 import { isValidCode } from "../shared/code";
+import { watchForNewBuild } from "./lib/version";
 
 /** Room URLs are `/r/CODE`; everything else is the landing screen. */
 function readPath(): string | null {
@@ -19,6 +20,10 @@ export function App() {
     addEventListener("popstate", onPop);
     return () => removeEventListener("popstate", onPop);
   }, []);
+
+  // Never reload while audio is running: a reload mid-song would be a much
+  // more obvious fault than the stale code it is fixing.
+  useEffect(() => watchForNewBuild(() => document.body.dataset.playing === "1"), []);
 
   const enter = useCallback((next: string, token: string | null) => {
     if (token) sessionStorage.setItem(`downbeat.host.${next}`, token);

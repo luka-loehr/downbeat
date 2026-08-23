@@ -1,5 +1,6 @@
 import Foundation
 import CoreAudio
+import Synchronization
 
 // Line-buffer stdout: piped into a log or a pipeline, Swift block-buffers and
 // the status lines only appear once the process ends, which is useless.
@@ -66,7 +67,7 @@ func parseOptions() -> Options {
         case "--offline": o.offline = true
         case "-h", "--help":
             print("""
-            downbeat login              Passphrase einmalig hinterlegen
+            downbeat login              Passphrase einmalig speichern
             downbeat logout             hinterlegte Passphrase löschen
             downbeat host [Optionen]
 
@@ -74,7 +75,7 @@ func parseOptions() -> Options {
               --buffer <ms>              Verzögerung, Standard 2000
               --code <ABC123>            fester Raumcode statt zufällig
               --takeover                 laufende Session dieses Codes übernehmen
-              --passphrase <wort>        Host-Passphrase (sonst Schlüsselbund)
+              --passphrase <wort>        Host-Passphrase (sonst gespeicherte)
               --url <https://...>        Server (oder DOWNBEAT_URL)
               --no-mute                  Quelle lokal NICHT stummschalten
               --no-local                 auf diesem Mac nicht mitspielen
@@ -133,8 +134,8 @@ case "login":
     let probe = Transport(baseURL: url, clock: RoomClock())
     do { try probe.createRoom(passphrase: passphrase) }
     catch { die("Anmeldung fehlgeschlagen — \(error)") }
-    guard Credentials.save(passphrase, host: host) else { die("Keychain hat abgelehnt") }
-    print("angemeldet an \(host) — die Passphrase liegt jetzt im Schlüsselbund")
+    guard Credentials.save(passphrase, host: host) else { die("konnte \(Credentials.location) nicht schreiben") }
+    print("angemeldet an \(host) — Passphrase in \(Credentials.location) (nur für dich lesbar)")
     exit(0)
 case "logout":
     let (_, host) = serverHost(from: Array(CommandLine.arguments))
@@ -173,7 +174,7 @@ if !options.offline && passphrase.isEmpty {
     die("nicht angemeldet. Einmal `downbeat login` ausführen.")
 }
 
-nonisolated(unsafe) let clock = RoomClock()
+let clock = RoomClock()
 nonisolated(unsafe) let tap = ProcessTap()
 let ring = RingBuffer(seconds: max(8, options.bufferMs / 1000 * 3), sampleRate: 48000, channels: 2)
 
@@ -194,8 +195,8 @@ nonisolated(unsafe) var player: LocalPlayer?
 nonisolated(unsafe) var transport: Transport?
 nonisolated(unsafe) var anchorLocalMs: Double = 0
 nonisolated(unsafe) var anchored = false
-nonisolated(unsafe) var listeners = 0
-nonisolated(unsafe) var memberList: [[String: Any]] = []
+/// Touched from the URLSession delegate queue and read by the status loop.
+let listenerCount = Atomic<Int>(0)
 
 // ---- room ----------------------------------------------------------------
 
@@ -205,10 +206,18 @@ if !options.offline {
         try t.createRoom(passphrase: passphrase, code: options.code,
                          takeover: options.takeover, sourceLabel: options.sourceLabel)
     } catch { die("\(error)") }
-    t.onMembers = { members in
-        memberList = members
-        listeners = members.count
-        Events.emit(["t": "members", "list": members, "count": members.count])
+    // These fire on the URLSession delegate queue. They must not capture
+    // anything main-actor isolated -- see Transport.MemberSnapshot.
+    t.onLink = { @Sendable up, reason in
+        Events.emit(["t": "link", "up": up, "reason": reason])
+        Events.log(up ? "info" : "warn",
+                   up ? "Verbindung wiederhergestellt" : "Verbindung verloren: \(reason)")
+    }
+    t.onMembers = { @Sendable snapshot in
+        listenerCount.store(snapshot.count, ordering: .relaxed)
+        Events.emitRaw("members",
+                       ["count": snapshot.count, "spreadMs": snapshot.spreadMs],
+                       jsonKey: "list", json: snapshot.json)
     }
     t.connect()
     transport = t
@@ -218,7 +227,7 @@ if !options.offline {
 // ---- capture -------------------------------------------------------------
 
 do {
-    try tap.start(pid: options.pid, mute: options.mute) { samples, frames, hostTime in
+    try tap.start(pid: options.pid, mute: options.mute) { @Sendable samples, frames, hostTime in
         if !anchored {
             anchorLocalMs = RoomClock.localMs(hostTime: hostTime)
             anchored = true
@@ -416,7 +425,14 @@ while true {
             "synced": clock.isSynced,
             "starved": player?.starvedFrames ?? 0,
             "reanchors": player?.reanchors ?? 0,
-            "listeners": listeners,
+            "listeners": listenerCount.load(ordering: .relaxed),
+            "linked": transport?.linked ?? false,
+            "droppedFrames": transport?.droppedFrames ?? 0,
+            "sendErrors": transport?.sendErrors ?? 0,
+            "inFlight": transport?.inFlight ?? 0,
+            "lastSendError": transport?.lastSendError ?? "",
+            "received": transport?.received ?? 0,
+            "receiveArmed": transport?.receiveArmed ?? false,
             "uptimeSec": secs,
             // dBFS per ~10 ms of capture, oldest first.
             "levels": levels.map { $0 > 0 ? 20 * log10(Double($0)) : -120.0 },
