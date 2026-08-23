@@ -29,12 +29,6 @@ const MAX_RATE_DEVIATION = 0.004;
 /** Proportional gain: aim to erase the error over roughly two seconds. */
 const DRIFT_GAIN = 0.5;
 const DRIFT_TICK_MS = 250;
-/**
- * Live: how far the fixed placement anchor may drift from the room clock before
- * it is worth re-anchoring. Re-anchoring costs one discontinuity, so the
- * threshold sits well above anything the ear would notice as a timing error.
- */
-const ANCHOR_RESET_MS = 30;
 /** Metronome: one click per room-clock second, accented every fourth. */
 const CLICK_PERIOD_MS = 1000;
 const CLICK_LOOKAHEAD_MS = 500;
@@ -470,6 +464,8 @@ export interface LiveStats {
   anchorErrorMs: number;
   /** Times the anchor had to be reset -- each one is a single discontinuity. */
   reanchors: number;
+  /** Playback rate the drift controller is currently applying. */
+  rate: number;
 }
 
 export class LivePlayer {
@@ -493,12 +489,17 @@ export class LivePlayer {
    */
   private frameOffset = 0;
   private anchored = false;
-  /** Drift between where the anchor puts audio and where the clock now says. */
+  /** The anchor packet, so the wanted position can be derived at any instant. */
+  private anchorPlayAt = 0;
+  private anchorSample = 0;
+  /** Steering error reported back by the worklet, ms. */
   private anchorErrorMs = 0;
+  private appliedRate = 1;
+  private resyncs = 0;
 
   private stats: LiveStats = {
     decoded: 0, late: 0, marginMs: 0, underruns: 0, aheadMs: 0,
-    anchorErrorMs: 0, reanchors: 0,
+    anchorErrorMs: 0, reanchors: 0, rate: 1,
   };
 
   constructor(
@@ -521,7 +522,12 @@ export class LivePlayer {
   }
 
   getStats(): LiveStats {
-    return { ...this.stats, anchorErrorMs: this.anchorErrorMs };
+    return {
+      ...this.stats,
+      anchorErrorMs: this.anchorErrorMs,
+      rate: this.appliedRate,
+      reanchors: this.resyncs,
+    };
   }
 
   async start(config: LiveConfig): Promise<void> {
@@ -532,10 +538,11 @@ export class LivePlayer {
     this.config = config;
     this.stats = {
       decoded: 0, late: 0, marginMs: 0, underruns: 0, aheadMs: 0,
-      anchorErrorMs: 0, reanchors: 0,
+      anchorErrorMs: 0, reanchors: 0, rate: 1,
     };
     this.kInit = false;
     this.anchored = false;
+    this.resyncs = 0;
 
     if (!this.moduleLoaded) {
       await this.ctx.audioWorklet.addModule("/live-processor.js");
@@ -549,10 +556,20 @@ export class LivePlayer {
       processorOptions: { channels: config.channels },
     });
     node.port.onmessage = (event) => {
-      const data = event.data as { type: string; underruns: number; ahead: number };
+      const data = event.data as {
+        type: string;
+        underruns: number;
+        ahead: number;
+        errFrames: number;
+        rate: number;
+        resyncs: number;
+      };
       if (data.type !== "stats") return;
       this.stats.underruns = data.underruns;
       this.stats.aheadMs = (data.ahead / this.ctx.sampleRate) * 1000;
+      this.anchorErrorMs = (data.errFrames / this.ctx.sampleRate) * 1000;
+      this.appliedRate = data.rate;
+      this.resyncs = data.resyncs;
     };
     node.connect(this.out);
     this.node = node;
@@ -614,20 +631,15 @@ export class LivePlayer {
     );
     if (!this.anchored) {
       this.frameOffset = wanted - sampleIndex;
+      this.anchorPlayAt = playAt;
+      this.anchorSample = sampleIndex;
       this.anchored = true;
-      this.anchorErrorMs = 0;
-    } else {
-      const errFrames = wanted - (sampleIndex + this.frameOffset);
-      this.anchorErrorMs = (errFrames / this.ctx.sampleRate) * 1000;
-      // Audio clocks drift by parts per million, so this creeps rather than
-      // jumps. Re-anchoring costs one discontinuity, so it is worth doing only
-      // once the error is bigger than the discontinuity would be.
-      if (Math.abs(this.anchorErrorMs) > ANCHOR_RESET_MS) {
-        this.frameOffset = wanted - sampleIndex;
-        this.stats.reanchors++;
-        this.anchorErrorMs = 0;
-      }
     }
+
+    // Tell the worklet where its read head should be. It steers itself from
+    // there every render quantum; nothing here ever moves audio, so the
+    // placement of packets stays exactly contiguous.
+    this.postSyncPoint();
 
     decoder.decode(
       new EncodedAudioChunk({
@@ -637,6 +649,30 @@ export class LivePlayer {
         data: new Uint8Array(frame, LIVE_HEADER_BYTES),
       }),
     );
+  }
+
+  /**
+   * Publish "at output frame F, ring index W must be heard".
+   *
+   * W comes from the room clock, so every device in the room is aiming at the
+   * same sample at the same instant -- which is what makes them agree with each
+   * other, rather than merely each being internally smooth.
+   */
+  private postSyncPoint(): void {
+    const node = this.node;
+    if (!node || !this.anchored) return;
+    const rate = this.ctx.sampleRate;
+
+    // Room time at which the sample now leaving the graph will be heard.
+    const heardNowMs = (this.ctx.currentTime - this.k) * 1000;
+    const wantedSample =
+      this.anchorSample + ((heardNowMs - this.anchorPlayAt) / 1000) * rate;
+
+    node.port.postMessage({
+      type: "sync",
+      frame: Math.round(this.ctx.currentTime * rate),
+      ring: wantedSample + this.frameOffset,
+    });
   }
 
   /** Keep `k` tracking the real relationship between the two clocks. */
