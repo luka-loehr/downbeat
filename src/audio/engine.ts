@@ -29,6 +29,12 @@ const MAX_RATE_DEVIATION = 0.004;
 /** Proportional gain: aim to erase the error over roughly two seconds. */
 const DRIFT_GAIN = 0.5;
 const DRIFT_TICK_MS = 250;
+/**
+ * Live: how far the fixed placement anchor may drift from the room clock before
+ * it is worth re-anchoring. Re-anchoring costs one discontinuity, so the
+ * threshold sits well above anything the ear would notice as a timing error.
+ */
+const ANCHOR_RESET_MS = 30;
 /** Metronome: one click per room-clock second, accented every fourth. */
 const CLICK_PERIOD_MS = 1000;
 const CLICK_LOOKAHEAD_MS = 500;
@@ -460,6 +466,10 @@ export interface LiveStats {
   underruns: number;
   /** Audio sitting ahead of the play head, ms. */
   aheadMs: number;
+  /** How far the fixed anchor has drifted from the room clock, ms. */
+  anchorErrorMs: number;
+  /** Times the anchor had to be reset -- each one is a single discontinuity. */
+  reanchors: number;
 }
 
 export class LivePlayer {
@@ -477,8 +487,18 @@ export class LivePlayer {
   private k = 0;
   private kInit = false;
 
+  /**
+   * Ring position of stream sample 0. Established once from the room clock and
+   * then held, so packet placement is exactly contiguous.
+   */
+  private frameOffset = 0;
+  private anchored = false;
+  /** Drift between where the anchor puts audio and where the clock now says. */
+  private anchorErrorMs = 0;
+
   private stats: LiveStats = {
     decoded: 0, late: 0, marginMs: 0, underruns: 0, aheadMs: 0,
+    anchorErrorMs: 0, reanchors: 0,
   };
 
   constructor(
@@ -501,7 +521,7 @@ export class LivePlayer {
   }
 
   getStats(): LiveStats {
-    return { ...this.stats };
+    return { ...this.stats, anchorErrorMs: this.anchorErrorMs };
   }
 
   async start(config: LiveConfig): Promise<void> {
@@ -510,8 +530,12 @@ export class LivePlayer {
       throw new Error("dieser Browser kann kein Opus dekodieren (Safari 26+ nötig)");
     }
     this.config = config;
-    this.stats = { decoded: 0, late: 0, marginMs: 0, underruns: 0, aheadMs: 0 };
+    this.stats = {
+      decoded: 0, late: 0, marginMs: 0, underruns: 0, aheadMs: 0,
+      anchorErrorMs: 0, reanchors: 0,
+    };
     this.kInit = false;
+    this.anchored = false;
 
     if (!this.moduleLoaded) {
       await this.ctx.audioWorklet.addModule("/live-processor.js");
@@ -565,13 +589,15 @@ export class LivePlayer {
     this.config = null;
   }
 
-  /** Feed one wire frame: Float64 playAtRoomMs followed by the Opus packet. */
+  /** Feed one wire frame: play instant, sample index, then the Opus packet. */
   push(frame: ArrayBuffer): void {
     const decoder = this.decoder;
     if (!decoder || decoder.state !== "configured") return;
     if (frame.byteLength <= LIVE_HEADER_BYTES) return;
 
-    const playAt = new DataView(frame).getFloat64(0, true);
+    const view = new DataView(frame);
+    const playAt = view.getFloat64(0, true);
+    const sampleIndex = view.getFloat64(8, true);
     this.trackMapping();
 
     const margin = playAt - this.clock.now();
@@ -582,10 +608,32 @@ export class LivePlayer {
       return;
     }
 
+    // Where the room clock says this sample belongs, right now.
+    const wanted = Math.round(
+      (playAt / 1000 + this.k - this.deviceOffsetMs() / 1000) * this.ctx.sampleRate,
+    );
+    if (!this.anchored) {
+      this.frameOffset = wanted - sampleIndex;
+      this.anchored = true;
+      this.anchorErrorMs = 0;
+    } else {
+      const errFrames = wanted - (sampleIndex + this.frameOffset);
+      this.anchorErrorMs = (errFrames / this.ctx.sampleRate) * 1000;
+      // Audio clocks drift by parts per million, so this creeps rather than
+      // jumps. Re-anchoring costs one discontinuity, so it is worth doing only
+      // once the error is bigger than the discontinuity would be.
+      if (Math.abs(this.anchorErrorMs) > ANCHOR_RESET_MS) {
+        this.frameOffset = wanted - sampleIndex;
+        this.stats.reanchors++;
+        this.anchorErrorMs = 0;
+      }
+    }
+
     decoder.decode(
       new EncodedAudioChunk({
         type: "key", // every Opus packet stands alone
-        timestamp: Math.round(playAt * 1000), // carried through to render()
+        // Carried through to render() as the placement index, not as a time.
+        timestamp: Math.round(sampleIndex),
         data: new Uint8Array(frame, LIVE_HEADER_BYTES),
       }),
     );
@@ -617,7 +665,7 @@ export class LivePlayer {
     const node = this.node;
     try {
       if (!node) return;
-      const playAt = data.timestamp / 1000; // back to room-clock ms
+      const sampleIndex = data.timestamp; // placement index, carried through
       const frames = data.numberOfFrames;
       const channels = data.numberOfChannels;
 
@@ -628,13 +676,10 @@ export class LivePlayer {
         planes.push(plane);
       }
 
-      // Where this audio belongs on the output timeline.
-      const startFrame = Math.round(
-        (playAt / 1000 + this.k - this.deviceOffsetMs() / 1000) * this.ctx.sampleRate,
-      );
-
+      // Contiguous by construction: consecutive packets differ by exactly their
+      // own length, so no rounding can open a hole between them.
       node.port.postMessage(
-        { type: "audio", startFrame, planes },
+        { type: "audio", startFrame: sampleIndex + this.frameOffset, planes },
         planes.map((p) => p.buffer),
       );
       this.stats.decoded++;

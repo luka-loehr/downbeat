@@ -10,6 +10,9 @@ import AudioToolbox
  "which sample belongs to this instant" from the very same clock, so the Mac is
  not a special case that happens to sound right -- it is just another speaker.
  */
+/// How far the read head may drift from the clock before it is worth moving.
+private let ANCHOR_RESET_S = 0.030
+
 final class LocalPlayer {
     private let ring: RingBuffer
     private let clock: RoomClock
@@ -29,6 +32,20 @@ final class LocalPlayer {
     var anchored = false
     /// Frames that arrived too late to be played, for honest reporting.
     private(set) var starvedFrames: Int = 0
+    /// Times the read position had to be re-derived from the clock.
+    private(set) var reanchors: Int = 0
+
+    /**
+     Read position, advanced by exactly the frames consumed.
+
+     Recomputing it from the clock on every callback sounds equivalent and is
+     not: the rounding moves by a sample here and there, and every one of those
+     is a hole or a repeat -- a crackle rather than a glitch. The clock is
+     consulted to place the read head once, and afterwards only to notice if it
+     has drifted far enough to be worth moving.
+     */
+    private var readFrame: Int64 = 0
+    private var reading = false
 
     init(ring: RingBuffer, clock: RoomClock, sampleRate: Double, channels: Int, bufferMs: Double) {
         self.ring = ring
@@ -83,7 +100,17 @@ final class LocalPlayer {
             let frames = Int(out[0].mDataByteSize) / MemoryLayout<Float>.size
                 / max(1, Int(out[0].mNumberChannels))
             let n = min(frames, self.scratchFrames)
-            let got = self.ring.read(into: self.scratch, from: wantFrame, frames: n)
+
+            if !self.reading {
+                self.readFrame = wantFrame
+                self.reading = true
+            } else if abs(self.readFrame - wantFrame) > Int64(rate * ANCHOR_RESET_S) {
+                self.readFrame = wantFrame
+                self.reanchors += 1
+            }
+
+            let got = self.ring.read(into: self.scratch, from: self.readFrame, frames: n)
+            self.readFrame += Int64(n)
             if got < n { self.starvedFrames += (n - got) }
 
             Self.scatter(self.scratch, frames: n, sourceChannels: chans, into: out)

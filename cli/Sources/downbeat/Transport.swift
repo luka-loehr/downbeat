@@ -14,6 +14,8 @@ final class Transport: NSObject, @unchecked Sendable {
     private(set) var code = ""
     private(set) var hostToken = ""
     var onOpen: (() -> Void)?
+    /// Full member list, so the host can see who is connected and how well.
+    var onMembers: (([[String: Any]]) -> Void)?
 
     init(baseURL: URL, clock: RoomClock) {
         self.baseURL = baseURL
@@ -151,6 +153,13 @@ final class Transport: NSObject, @unchecked Sendable {
               let type = obj["t"] as? String else { return }
         if type == "pong", let t0 = obj["t0"] as? Double, let t1 = obj["t1"] as? Double {
             clock.onPong(t0: t0, t1: t1)
+            return
+        }
+        if type == "state" || type == "welcome",
+           let state = obj["state"] as? [String: Any],
+           let members = state["members"] as? [[String: Any]] {
+            // The source is in the member list too; the host cares about speakers.
+            onMembers?(members.filter { ($0["role"] as? String) != "source" })
         }
     }
 
@@ -182,10 +191,19 @@ final class Transport: NSObject, @unchecked Sendable {
         task?.send(.string(text)) { _ in }
     }
 
-    /// One wire frame: Float64 playAtRoomMs, little-endian, then the packet.
-    func sendPacket(_ packet: Data, playAtRoomMs: Double) {
-        var frame = Data(capacity: 8 + packet.count)
+    /**
+     One wire frame: play instant, sample index, then the packet.
+
+     The receiver places audio by `sampleIndex`, never by the timestamp: the
+     index is exact and monotonic, so consecutive packets land exactly their own
+     length apart. Deriving position from the timestamp instead lets every
+     fractional clock correction round into a one-sample hole, which is audible
+     as a crackle fifty times a second.
+     */
+    func sendPacket(_ packet: Data, playAtRoomMs: Double, sampleIndex: Int64) {
+        var frame = Data(capacity: 16 + packet.count)
         withUnsafeBytes(of: playAtRoomMs.bitPattern.littleEndian) { frame.append(contentsOf: $0) }
+        withUnsafeBytes(of: Double(sampleIndex).bitPattern.littleEndian) { frame.append(contentsOf: $0) }
         frame.append(packet)
         task?.send(.data(frame)) { _ in }
     }

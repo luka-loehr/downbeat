@@ -118,14 +118,22 @@ export type ServerMessage =
 /**
  * Live audio does not travel as JSON. Each binary frame is:
  *
- *   [ Float64 playAtRoomMs ][ Opus packet bytes ]
+ *   [ Float64 playAtRoomMs ][ Float64 sampleIndex ][ Opus packet bytes ]
  *
- * The instant is computed by the source, not the receiver: the CLI knows the
- * capture anchor and the buffer, so a client never has to reconstruct timing
- * from packet arrival. Late packets are therefore obvious and droppable rather
- * than silently played at the wrong moment.
+ * `playAtRoomMs` anchors the stream to the room clock once, and is what makes a
+ * late packet detectable. `sampleIndex` is what the receiver actually places by.
+ *
+ * Both are needed, and the reason is the whole difference between clean audio
+ * and a crackle. Deriving a packet's position from its timestamp means running
+ * it through the room->context mapping fifty times a second, and that mapping
+ * moves by fractions of a millisecond as the clock is corrected. Rounded to
+ * samples, consecutive packets then land 959 or 961 frames apart instead of
+ * exactly 960, and every one-sample hole is a click. The sample index is exact
+ * and monotonic, so placement is contiguous by construction; the timestamp is
+ * consulted once to decide where the stream begins, and afterwards only to
+ * notice if it has drifted far enough to be worth re-anchoring.
  */
-export const LIVE_HEADER_BYTES = 8;
+export const LIVE_HEADER_BYTES = 16;
 
 /** Seconds of lead time granted so every client can schedule before the deadline. */
 export const MIN_LEAD_MS = 1500;

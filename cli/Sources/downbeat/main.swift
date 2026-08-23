@@ -26,6 +26,7 @@ struct Options {
     var offline = false
     var code: String?
     var takeover = false
+    var json = false
 }
 
 func parseOptions() -> Options {
@@ -59,6 +60,7 @@ func parseOptions() -> Options {
             i += 1
             if i < args.count { o.code = args[i].uppercased() }
         case "--takeover": o.takeover = true
+        case "--json": o.json = true
         case "--no-mute": o.mute = false
         case "--no-local": o.playLocally = false
         case "--offline": o.offline = true
@@ -77,6 +79,7 @@ func parseOptions() -> Options {
               --no-mute                  Quelle lokal NICHT stummschalten
               --no-local                 auf diesem Mac nicht mitspielen
               --offline                  nur lokal, kein Raum
+              --json                     NDJSON-Ereignisse statt Textausgabe
             """)
             exit(0)
         default: break
@@ -157,6 +160,7 @@ if CommandLine.arguments.dropFirst().first == "selftest-qr" {
 }
 
 let options = parseOptions()
+Events.enabled = options.json
 
 if options.pid == nil && options.sourceLabel != "System" {
     die("\(options.sourceLabel) läuft nicht — starte es und spiel etwas ab.")
@@ -178,6 +182,10 @@ final class Stats: @unchecked Sendable {
     var captured: Int64 = 0
     var sent: Int64 = 0
     var bytes: Int64 = 0
+    /// One peak per capture callback (~10 ms), drained by the status tick.
+    /// Enough resolution for the UI to draw a real waveform rather than a
+    /// single number that twitches once a second.
+    var levels: [Float] = []
     let lock = NSLock()
 }
 let stats = Stats()
@@ -186,6 +194,8 @@ nonisolated(unsafe) var player: LocalPlayer?
 nonisolated(unsafe) var transport: Transport?
 nonisolated(unsafe) var anchorLocalMs: Double = 0
 nonisolated(unsafe) var anchored = false
+nonisolated(unsafe) var listeners = 0
+nonisolated(unsafe) var memberList: [[String: Any]] = []
 
 // ---- room ----------------------------------------------------------------
 
@@ -195,8 +205,14 @@ if !options.offline {
         try t.createRoom(passphrase: passphrase, code: options.code,
                          takeover: options.takeover, sourceLabel: options.sourceLabel)
     } catch { die("\(error)") }
+    t.onMembers = { members in
+        memberList = members
+        listeners = members.count
+        Events.emit(["t": "members", "list": members, "count": members.count])
+    }
     t.connect()
     transport = t
+    Events.log("info", "Raum \(t.code) geöffnet")
 }
 
 // ---- capture -------------------------------------------------------------
@@ -219,7 +235,11 @@ do {
         stats.lock.lock()
         stats.captured += Int64(frames)
         let n = frames * 2
-        for i in 0..<n { let a = abs(samples[i]); if a > stats.peak { stats.peak = a } }
+        var localPeak: Float = 0
+        for i in 0..<n { let a = abs(samples[i]); if a > localPeak { localPeak = a } }
+        if localPeak > stats.peak { stats.peak = localPeak }
+        stats.levels.append(localPeak)
+        if stats.levels.count > 400 { stats.levels.removeFirst(stats.levels.count - 400) }
         stats.lock.unlock()
     }
 } catch {
@@ -292,7 +312,7 @@ if let t = transport {
                 let captureRoomMs = anchorLocalMs
                     + Double(encoded) / rate * 1000
                     + streamOffset
-                t.sendPacket(packet, playAtRoomMs: captureRoomMs + buffer)
+                t.sendPacket(packet, playAtRoomMs: captureRoomMs + buffer, sampleIndex: encoded)
                 stats.lock.lock()
                 stats.sent += 1
                 stats.bytes += Int64(packet.count)
@@ -315,45 +335,97 @@ nonisolated func shutdown() {
     transport?.close()
     player?.stop()
     tap.stop()
-    print("\ngestoppt — Quelle ist wieder hörbar")
+    if Events.enabled {
+        Events.log("info", "gestoppt — Quelle ist wieder hörbar")
+    } else {
+        print("\ngestoppt — Quelle ist wieder hörbar")
+    }
 }
 
 signal(SIGINT) { _ in shutdown(); exit(0) }
 signal(SIGTERM) { _ in shutdown(); exit(0) }
 
-print("")
-print("  Quelle    \(options.sourceLabel)  \(Int(rate)) Hz, \(channels) ch")
-print("  Puffer    \(Int(options.bufferMs)) ms")
-print("  Lokal     \(options.mute ? "stummgeschaltet" : "hörbar")"
-      + (options.playLocally ? ", Wiedergabe über Downbeat" : ", keine Wiedergabe"))
-if let t = transport {
-    print("")
-    let joinURL = options.baseURL.appendingPathComponent("r").appendingPathComponent(t.code)
-    if let modules = TerminalQR.modules(for: joinURL.absoluteString) {
-        print("")
-        print(TerminalQR.render(modules), terminator: "")
+if options.json {
+    Events.emit([
+        "t": "config",
+        "source": options.sourceLabel,
+        "sampleRate": rate,
+        "channels": channels,
+        "bufferMs": options.bufferMs,
+        "muted": options.mute,
+        "local": options.playLocally,
+        "offline": options.offline,
+    ])
+    if let t = transport {
+        let joinURL = options.baseURL.appendingPathComponent("r").appendingPathComponent(t.code)
+        let rows = (TerminalQR.modules(for: joinURL.absoluteString) ?? []).map { row in
+            String(row.map { $0 ? "1" : "0" })
+        }
+        Events.emit([
+            "t": "room",
+            "code": t.code,
+            "url": joinURL.absoluteString,
+            "host": (joinURL.host ?? "") + joinURL.path,
+            "qr": rows,
+        ])
     }
-    print("")
-    print("  Kamera drauf halten  –  oder Code eingeben:")
-    print("  \u{1b}[1m\(t.code)\u{1b}[0m   \((joinURL.host ?? "") + joinURL.path)")
 } else {
-    print("  Modus     offline (nur dieser Mac)")
+    print("")
+    print("  Quelle    \(options.sourceLabel)  \(Int(rate)) Hz, \(channels) ch")
+    print("  Puffer    \(Int(options.bufferMs)) ms")
+    print("  Lokal     \(options.mute ? "stummgeschaltet" : "hörbar")"
+          + (options.playLocally ? ", Wiedergabe über Downbeat" : ", keine Wiedergabe"))
+    if let t = transport {
+        let joinURL = options.baseURL.appendingPathComponent("r").appendingPathComponent(t.code)
+        if let modules = TerminalQR.modules(for: joinURL.absoluteString) {
+            print("")
+            print(TerminalQR.render(modules), terminator: "")
+        }
+        print("")
+        print("  Kamera drauf halten  –  oder Code eingeben:")
+        print("  \u{1b}[1m\(t.code)\u{1b}[0m   \((joinURL.host ?? "") + joinURL.path)")
+    } else {
+        print("  Modus     offline (nur dieser Mac)")
+    }
+    print("\n  Strg-C zum Beenden\n")
 }
-print("\n  Strg-C zum Beenden\n")
 
 let started = RoomClock.localNow()
+let statusInterval = options.json ? 0.2 : 1.0
 while true {
-    Thread.sleep(forTimeInterval: 1)
+    Thread.sleep(forTimeInterval: statusInterval)
     stats.lock.lock()
     let peak = stats.peak, captured = stats.captured, sent = stats.sent, bytes = stats.bytes
+    let levels = stats.levels
     stats.peak = 0
+    stats.levels.removeAll(keepingCapacity: true)
     stats.lock.unlock()
 
-    let db = peak > 0 ? String(format: "%6.1f dBFS", 20 * log10(peak)) : "  -inf dBFS"
     let secs = max(1, Int((RoomClock.localNow() - started) / 1000))
     let kbits = Double(bytes) * 8 / Double(secs) / 1000
-    let sync = transport == nil ? "offline"
-        : (clock.isSynced ? String(format: "±%.1fms", clock.uncertainty) : "sync…")
-    print(String(format: "  %@  aufgenommen %5.1fs  Pakete %5d  %5.0f kbit/s  Uhr %@  starved %d",
-                 db, Double(captured) / rate, sent, kbits, sync, player?.starvedFrames ?? 0))
+    let peakDb = peak > 0 ? 20 * log10(Double(peak)) : -120.0
+
+    if options.json {
+        Events.emit([
+            "t": "status",
+            "peakDb": peakDb,
+            "capturedSec": Double(captured) / rate,
+            "packets": sent,
+            "kbits": kbits,
+            "clockMs": clock.uncertainty,
+            "synced": clock.isSynced,
+            "starved": player?.starvedFrames ?? 0,
+            "reanchors": player?.reanchors ?? 0,
+            "listeners": listeners,
+            "uptimeSec": secs,
+            // dBFS per ~10 ms of capture, oldest first.
+            "levels": levels.map { $0 > 0 ? 20 * log10(Double($0)) : -120.0 },
+        ])
+    } else {
+        let db = peak > 0 ? String(format: "%6.1f dBFS", peakDb) : "  -inf dBFS"
+        let sync = transport == nil ? "offline"
+            : (clock.isSynced ? String(format: "±%.1fms", clock.uncertainty) : "sync…")
+        print(String(format: "  %@  aufgenommen %5.1fs  Pakete %5d  %5.0f kbit/s  Uhr %@  starved %d",
+                     db, Double(captured) / rate, sent, kbits, sync, player?.starvedFrames ?? 0))
+    }
 }
