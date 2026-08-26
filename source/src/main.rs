@@ -137,12 +137,26 @@ impl Status {
     }
 }
 
-/// The librespot sink: hands every decoded packet straight to the encoder task
-/// through an unbounded channel. The trait methods are synchronous and run on
-/// librespot's audio thread, so they must never block — an unbounded `send`
-/// returns immediately.
+/// How far ahead of realtime the decoder may run. Enough to ride out encoder
+/// hiccups, small next to the delay budget.
+const SINK_LEAD: Duration = Duration::from_millis(250);
+
+/// The librespot sink: hands every decoded packet to the encoder task, at
+/// realtime pace.
+///
+/// The pacing is not optional. librespot has no clock of its own — a real
+/// audio backend blocks on the sound card and THAT is what holds playback to
+/// realtime. A sink that accepts samples as fast as they decode "plays" a
+/// three-minute track in seconds: Spotify sees each song end moments after it
+/// began and advances the queue, while the room drowns in a firehose of
+/// packets stamped into the far future. So this sink is the metronome: it
+/// tracks a virtual playhead and sleeps whenever decode runs more than
+/// [`SINK_LEAD`] ahead of the wall clock. `write` runs on librespot's player
+/// thread, where blocking is exactly what backends are expected to do.
 struct ChannelSink {
     tx: mpsc::UnboundedSender<Vec<f32>>,
+    /// Wall-clock instant the next chunk is due; `None` until the first write.
+    next: Option<std::time::Instant>,
 }
 
 impl Sink for ChannelSink {
@@ -150,10 +164,27 @@ impl Sink for ChannelSink {
         Ok(())
     }
     fn stop(&mut self) -> SinkResult<()> {
+        self.next = None;
         Ok(())
     }
     fn write(&mut self, packet: AudioPacket, _converter: &mut Converter) -> SinkResult<()> {
         if let AudioPacket::Samples(samples) = packet {
+            let now = std::time::Instant::now();
+            let frames = samples.len() / CHANNELS;
+            let dur = Duration::from_secs_f64(frames as f64 / SPOTIFY_RATE as f64);
+
+            // A pause or seek leaves `next` in the past; re-anchor instead of
+            // rushing to catch up — bursts are exactly what this prevents.
+            let next = match self.next {
+                Some(n) if n > now => n,
+                _ => now,
+            };
+            let ahead = next - now;
+            if ahead > SINK_LEAD {
+                std::thread::sleep(ahead - SINK_LEAD);
+            }
+            self.next = Some(next + dur);
+
             // f64 interleaved stereo at 44.1 kHz -> f32 for the encoder path.
             let f32s: Vec<f32> = samples.iter().map(|s| *s as f32).collect();
             let _ = self.tx.send(f32s);
@@ -280,7 +311,7 @@ async fn run_spotify(
             PlayerConfig::default(),
             session.clone(),
             mixer.get_soft_volume(),
-            move || Box::new(ChannelSink { tx: tx.clone() }),
+            move || Box::new(ChannelSink { tx: tx.clone(), next: None }),
         );
 
         match Spirc::new(
