@@ -125,11 +125,18 @@ export async function spotifyCallback(request: Request, env: Env): Promise<Respo
 
 /* ------------------------------------------------------------- status/logout */
 
-/** POST /api/spotify/status {passphrase} → what the dashboard shows. */
+/**
+ * POST /api/spotify/status {passphrase} → what the dashboard shows.
+ *
+ * Passphrase first, config second: this endpoint doubles as the console's
+ * unlock check, and a deployment whose Spotify secrets are not set yet must
+ * still let its operator in — to be told exactly that, on the page.
+ */
 export async function spotifyStatus(request: Request, env: Env): Promise<Response> {
   const body = (await request.json().catch(() => ({}))) as { passphrase?: string };
-  const gate = requireConfig(env) ?? requirePassphrase(body.passphrase, env);
+  const gate = requirePassphrase(body.passphrase, env);
   if (gate) return gate;
+  if (requireConfig(env)) return json({ connected: false, configured: false });
 
   const row = await env.DB.prepare(
     "SELECT display_name, product, scope, connected_at FROM spotify_tokens WHERE operator = ?1",
@@ -137,9 +144,10 @@ export async function spotifyStatus(request: Request, env: Env): Promise<Respons
     .bind(OPERATOR)
     .first<{ display_name: string | null; product: string | null; scope: string; connected_at: number }>();
 
-  if (!row) return json({ connected: false });
+  if (!row) return json({ connected: false, configured: true });
   return json({
     connected: true,
+    configured: true,
     displayName: row.display_name,
     product: row.product,
     connectedAt: row.connected_at,

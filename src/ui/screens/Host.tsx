@@ -14,6 +14,8 @@ import { useObserver } from "../lib/useObserver";
 
 interface SpotifyState {
   connected: boolean;
+  /** False while the deployment's Spotify secrets are not set yet. */
+  configured?: boolean;
   displayName?: string | null;
   product?: string | null;
 }
@@ -316,6 +318,17 @@ function Console({
       <Section n="1" title="Spotify" delay={80}>
         {spotify === null ? (
           <Row label="Checking" value="…" />
+        ) : spotify.configured === false ? (
+          <>
+            <p className="text-sm leading-relaxed text-muted">
+              This deployment has no Spotify app yet. Create one at{" "}
+              <span className="num text-ink">developer.spotify.com/dashboard</span>, then set the
+              secrets:
+            </p>
+            <pre className="num mt-3 overflow-x-auto rounded-lg border border-line bg-panel px-4 py-3 text-[11px] leading-relaxed text-muted">
+              {"npx wrangler secret put SPOTIFY_CLIENT_ID\nnpx wrangler secret put SPOTIFY_CLIENT_SECRET\nopenssl rand -base64 32 | npx wrangler secret put TOKEN_KEY"}
+            </pre>
+          </>
         ) : spotify.connected ? (
           <>
             <Row label="Account" value={spotify.displayName ?? "connected"} good />
