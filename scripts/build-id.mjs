@@ -26,6 +26,9 @@ const buildId = createHash("sha256")
   .update(read("src/audio/clock.ts"))
   .update(read("src/audio/room.ts"))
   .update(read("src/shared/protocol.ts"))
+  // The headers decide whether the page is cross-origin isolated, and with
+  // it whether shared-memory audio exists at all -- that is identity too.
+  .update(read("public/_headers"))
   .digest("hex")
   .slice(0, 12);
 
