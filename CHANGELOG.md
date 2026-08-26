@@ -3,6 +3,39 @@
 All notable changes to this project, with the conditions under which each
 measurement was taken.
 
+## [0.2.2] — 2026-08-26
+
+Reconnection that actually reconnects, on every side of the wire.
+
+### Fixed
+- **A CLI socket drop no longer kills the room for good.** When the source
+  socket died, the server cleared the live state and told every listener to
+  stop — and the reconnected CLI never announced the stream again, so it
+  resumed sending packets every phone silently discarded. The CLI now stores
+  its announcement and repeats it on every reconnect.
+- **Half-open sockets are detected within seconds, not minutes.** A network
+  that dies silently leaves the socket "open": sends keep succeeding and
+  `close` may not fire for minutes, while nothing comes back. Both the CLI
+  and the browser now notice an unanswered clock probe (probes flow every
+  2 s) and force a reconnect — the browser pairs ping against pong rather
+  than wall time, so a throttled background tab cannot condemn a healthy
+  socket.
+- **A fast source reconnect no longer races its own corpse.** The server only
+  clears the live state when the closing socket was the *last* source; a
+  replacement that connected before the old close event arrived keeps the
+  stream alive, and listeners who never noticed the outage keep playing
+  without a restart. Streams carry an epoch so a genuinely restarted CLI —
+  a fresh sample timeline — still restarts every listener exactly once.
+- **Joining or reconnecting mid-song now plays the song.** File-mode
+  reconciliation only handled the arming phase, so a device arriving while
+  the room was already playing sat silent until the next track — the
+  "have to reload the page" bug. The schedule is now derived from room state,
+  clamped to now, at the correct in-track position; a missed pause lands too.
+- The CLI's reconnect backoff only resets once a message actually arrives,
+  instead of on every attempt — a dead network is no longer a hot retry loop.
+  Stale receive callbacks from a cancelled socket can no longer tear down the
+  healthy replacement.
+
 ## [0.2.1] — 2026-08-26
 
 The ten-hour session: every drift source that only shows up after hours is

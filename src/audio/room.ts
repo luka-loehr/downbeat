@@ -26,6 +26,12 @@ type Listener = (s: RoomSnapshot) => void;
 const TELEMETRY_MS = 2000;
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 8000;
+/**
+ * A clock probe unanswered for this long means the socket is half-open: the
+ * network died without telling us, sends still "succeed", and `close` may not
+ * fire for minutes. Probes go out every 2 s, so a healthy link never trips it.
+ */
+const PONG_TIMEOUT_MS = 7000;
 
 export class RoomConnection {
   private ws: WebSocket | null = null;
@@ -48,13 +54,24 @@ export class RoomConnection {
   private listeners = new Set<Listener>();
   /** Guards against sending `ready` twice for the same arm. */
   private armedSeq = -1;
+  /** Guards against re-scheduling the same start on every state broadcast. */
+  private scheduledSeq = -1;
+  /** Epoch of the live stream currently playing; see LiveState.epoch. */
+  private liveEpoch: number | null = null;
+  /** `performance.now()` of the oldest clock probe still awaiting its pong.
+   *  Pairing ping against pong -- rather than against wall time -- keeps a
+   *  throttled background tab from condemning a healthy socket. */
+  private unansweredSince = 0;
 
   constructor(
     private readonly code: string,
     private readonly name: string,
     private readonly hostToken: string | null,
   ) {
-    this.clock = new SyncedClock((t0) => this.send({ t: "ping", t0 }));
+    this.clock = new SyncedClock((t0) => {
+      if (this.unansweredSince === 0) this.unansweredSince = performance.now();
+      this.send({ t: "ping", t0 });
+    });
   }
 
   /* ------------------------------------------------------------------ lifecycle */
@@ -131,6 +148,7 @@ export class RoomConnection {
       this.connected = true;
       this.attempt = 0;
       this.error = null;
+      this.unansweredSince = 0;
       this.clock.reset();
       this.clock.start();
       this.send({
@@ -191,6 +209,7 @@ export class RoomConnection {
   private async handle(msg: ServerMessage): Promise<void> {
     switch (msg.t) {
       case "pong":
+        this.unansweredSince = 0;
         this.clock.onPong(msg.t0, msg.t1);
         this.emit();
         return;
@@ -211,6 +230,7 @@ export class RoomConnection {
 
       case "play":
         if (!this.engine) return;
+        this.scheduledSeq = msg.seq;
         if (!this.engine.has(msg.trackId)) {
           // Should not happen -- the barrier waits for `ready` -- but if it
           // does, load and let schedule() clamp and report the start error.
@@ -245,9 +265,14 @@ export class RoomConnection {
     const engine = this.engine;
     if (!st || !engine) return;
 
-    // A live stream owns the room; the file barrier does not apply.
+    // A live stream owns the room; the file barrier does not apply. Restart
+    // when nothing is playing OR when the stream's epoch changed underneath
+    // us -- a source that was restarted while this socket was down has a
+    // fresh sample timeline the current player knows nothing about.
     if (st.live?.active) {
-      if (!this.live?.running) await this.applyLive(st.live);
+      if (!this.live?.running || (st.live.epoch ?? null) !== this.liveEpoch) {
+        await this.applyLive(st.live);
+      }
       return;
     }
     if (this.live?.running && !st.live) this.live.stop();
@@ -265,6 +290,32 @@ export class RoomConnection {
         this.error = err instanceof Error ? err.message : "could not load track";
         this.emit();
       }
+      return;
+    }
+
+    // A device that joins -- or reconnects -- while the room is already
+    // playing never saw the `play` broadcast: it fired before this socket
+    // existed. Derive the identical schedule from the state instead;
+    // `schedule()` clamps the past deadline to now and computes the correct
+    // in-track position from the room clock, and the seq guard keeps a device
+    // that is already playing from restarting itself on every state message.
+    if (st.mode === "scheduled" || st.mode === "playing") {
+      if (this.scheduledSeq === st.seq) return;
+      this.scheduledSeq = st.seq;
+      try {
+        await engine.load(track.id, `/audio/${track.id}`);
+        engine.schedule(track.id, st.startAt, st.offsetInTrack);
+      } catch (err) {
+        this.error = err instanceof Error ? err.message : "could not load track";
+        this.emit();
+      }
+      return;
+    }
+
+    // A pause that happened while this device was away must still land.
+    if (st.mode === "paused") {
+      const es = engine.status().state;
+      if (es === "playing" || es === "scheduled") engine.pause();
     }
   }
 
@@ -294,6 +345,15 @@ export class RoomConnection {
   private async applyLive(live: import("../shared/protocol").LiveState | null): Promise<void> {
     if (!this.live) return;
     if (live?.active) {
+      // A re-announce after a source reconnect is not a new stream. If the
+      // player is already running the same epoch, its sample timeline is
+      // unchanged: packets keep landing by index and playback never blinks.
+      // A different (or missing) epoch is a restarted source with a fresh
+      // timeline, which genuinely requires starting over.
+      if (this.live.running && this.liveEpoch !== null && live.epoch === this.liveEpoch) {
+        return;
+      }
+      this.liveEpoch = live.epoch ?? null;
       this.engine?.pause();
       await this.wake();
       try {
@@ -309,6 +369,7 @@ export class RoomConnection {
       }
     } else {
       this.live.stop();
+      this.liveEpoch = null;
     }
     this.emit();
   }
@@ -318,6 +379,18 @@ export class RoomConnection {
   }
 
   private sendTelemetry(): void {
+    // Half-open detection: if a probe has gone unanswered this long, the
+    // socket is dead even though `close` never fired. Closing it by hand
+    // hands recovery to the normal reconnect path.
+    if (
+      this.connected &&
+      this.unansweredSince > 0 &&
+      performance.now() - this.unansweredSince > PONG_TIMEOUT_MS
+    ) {
+      this.unansweredSince = 0;
+      this.ws?.close();
+      return;
+    }
     const stats = this.clock.stats();
     this.send({
       t: "telemetry",

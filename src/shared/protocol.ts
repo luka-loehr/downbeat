@@ -66,6 +66,13 @@ export interface LiveState {
   bufferMs: number;
   /** What is being captured, for the UI. */
   sourceLabel: string;
+  /**
+   * Identifies one run of the source across reconnects. A re-announce with
+   * the same epoch means "the stream you are playing", so a listener that
+   * never noticed the outage keeps playing without a restart; a new epoch is
+   * a restarted CLI with a fresh sample timeline, which requires one.
+   */
+  epoch?: number;
 }
 
 export interface RoomState {

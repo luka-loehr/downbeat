@@ -203,9 +203,16 @@ export class RoomDO implements DurableObject {
       /* already closed */
     }
     if (attach?.role === "source" && this.p.live) {
-      this.p.live = null;
-      await this.save();
-      this.broadcast({ t: "live", live: null });
+      // Only the LAST source socket takes the stream down. On a reconnect the
+      // replacement is often connected before the dead socket's close event
+      // arrives, and letting the corpse kill the live state would stop every
+      // listener while a healthy source is still streaming.
+      const remaining = this.ctx.getWebSockets("tx").filter((s) => s !== ws);
+      if (remaining.length === 0) {
+        this.p.live = null;
+        await this.save();
+        this.broadcast({ t: "live", live: null });
+      }
     }
     this.broadcastStateSoon();
   }

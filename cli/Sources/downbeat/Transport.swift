@@ -30,6 +30,17 @@ final class Transport: NSObject, @unchecked Sendable {
     private(set) var receiveArmed = false
     private var attempt = 0
     private var reopening = false
+    /// Pings go out every 2 s, so a healthy link never stays silent this long.
+    private static let staleAfterMs = 8000.0
+    private var lastReceivedMs = RoomClock.localNow()
+    /// The last liveStart announcement, kept so a reconnect can repeat it --
+    /// the Durable Object drops the live state when a source socket dies, and
+    /// without a re-announce every listener would keep discarding our packets.
+    private var liveAnnounce: [String: Any]?
+    /// Identifies THIS run of the stream across reconnects. A listener that
+    /// never noticed the outage sees the same epoch and keeps playing; a
+    /// restarted CLI gets a new one, which tells listeners to start over.
+    private let liveEpoch = Date().timeIntervalSince1970 * 1000
     var onOpen: (@Sendable () -> Void)?
     /// Connection state changes, for the host display.
     var onLink: (@Sendable (Bool, String) -> Void)?
@@ -139,6 +150,7 @@ final class Transport: NSObject, @unchecked Sendable {
         self.task = task
         running = true
         linked = true
+        lastReceivedMs = RoomClock.localNow()
         task.resume()
         receive()
 
@@ -146,6 +158,16 @@ final class Transport: NSObject, @unchecked Sendable {
         let thread = Thread { [weak self] in
             while let self, self.running {
                 self.sendPing()
+                // A dead network rarely closes the socket: sends keep being
+                // accepted while nothing comes back, and the OS can take
+                // minutes to notice. Pongs answer within one interval, so a
+                // silent stretch this long means the link is gone -- reopen
+                // it instead of waiting to be told.
+                if self.linked, RoomClock.localNow() - self.lastReceivedMs > Self.staleAfterMs {
+                    self.linked = false
+                    self.onLink?(false, "nothing received for \(Int(Self.staleAfterMs / 1000)) s")
+                    self.scheduleReopen()
+                }
                 let interval = self.burstLeft > 0 ? 0.04 : 2.0
                 if self.burstLeft > 0 { self.burstLeft -= 1 }
                 Thread.sleep(forTimeInterval: interval)
@@ -179,9 +201,12 @@ final class Transport: NSObject, @unchecked Sendable {
 
     private func receive() {
         receiveArmed = true
-        task?.receive { [weak self] result in
-            self?.receiveArmed = false
-            guard let self, self.running else { return }
+        let current = task
+        current?.receive { [weak self] result in
+            // A callback from a task that has already been replaced must be
+            // ignored: acting on it would tear down the healthy successor.
+            guard let self, self.running, current === self.task else { return }
+            self.receiveArmed = false
             switch result {
             case .failure(let error):
                 // A dropped socket used to end the stream silently: sends kept
@@ -193,6 +218,10 @@ final class Transport: NSObject, @unchecked Sendable {
                 self.scheduleReopen()
             case .success(let message):
                 self.received += 1
+                // Only a message proves the path works -- resetting the
+                // backoff any earlier turns a dead network into a hot loop.
+                self.attempt = 0
+                self.lastReceivedMs = RoomClock.localNow()
                 if case .string(let text) = message { self.handle(text) }
                 self.receive()
             }
@@ -228,13 +257,17 @@ final class Transport: NSObject, @unchecked Sendable {
         task.resume()
         receive()
         linked = true
-        attempt = 0
+        lastReceivedMs = RoomClock.localNow()
         // The new socket may ride a completely different network path, and the
         // old probe history would then outvote the truth for minutes. Start
         // over with a fresh burst; the encoder's slewed stream offset turns
         // whatever the estimate does into an inaudible ramp.
         clock.reset()
         burstLeft = 20
+        // The DO dropped the live state when the old socket died, and told
+        // every listener to stop. Announce the stream again -- same epoch, so
+        // a listener that never noticed the outage keeps playing untouched.
+        if let announce = liveAnnounce { send(json: announce) }
         onLink?(true, "reconnected")
         onOpen?()
     }
@@ -269,7 +302,7 @@ final class Transport: NSObject, @unchecked Sendable {
 
     func announceLive(sampleRate: Double, channels: Int, frameSize: Int,
                       bufferMs: Double, sourceLabel: String) {
-        send(json: ["t": "cmd", "cmd": [
+        let message: [String: Any] = ["t": "cmd", "cmd": [
             "c": "liveStart",
             "live": [
                 "sampleRate": sampleRate,
@@ -277,11 +310,16 @@ final class Transport: NSObject, @unchecked Sendable {
                 "frameSize": frameSize,
                 "bufferMs": bufferMs,
                 "sourceLabel": sourceLabel,
+                "epoch": liveEpoch,
             ],
-        ]])
+        ]]
+        liveAnnounce = message
+        send(json: message)
     }
 
     func stopLive() {
+        // Deliberate stop: a later reconnect must not resurrect the stream.
+        liveAnnounce = nil
         send(json: ["t": "cmd", "cmd": ["c": "liveStop"]])
     }
 
