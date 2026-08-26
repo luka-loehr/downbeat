@@ -229,7 +229,13 @@ final class Transport: NSObject, @unchecked Sendable {
         receive()
         linked = true
         attempt = 0
-        onLink?(true, "wieder verbunden")
+        // The new socket may ride a completely different network path, and the
+        // old probe history would then outvote the truth for minutes. Start
+        // over with a fresh burst; the encoder's slewed stream offset turns
+        // whatever the estimate does into an inaudible ramp.
+        clock.reset()
+        burstLeft = 20
+        onLink?(true, "reconnected")
         onOpen?()
     }
 
@@ -295,7 +301,11 @@ final class Transport: NSObject, @unchecked Sendable {
      as a crackle fifty times a second.
      */
     func sendPacket(_ packet: Data, playAtRoomMs: Double, sampleIndex: Int64) {
-        guard linked, let task else {
+        // The in-flight cap bounds what a stalled network can queue: past ~2.5 s
+        // of backlog every queued packet would arrive too late to be played
+        // anyway, and an unbounded queue would grow for as long as a ten-hour
+        // session keeps encoding into it.
+        guard linked, inFlight < 128, let task else {
             droppedFrames += 1
             return
         }

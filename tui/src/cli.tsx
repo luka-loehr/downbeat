@@ -42,7 +42,7 @@ if (!core) {
 /** Subcommands that are plain, interactive, or both -- run them as themselves. */
 const PASSTHROUGH = new Set(["login", "logout", "selftest", "selftest-qr"]);
 
-const VERSION = "0.2.0";
+const VERSION = "0.2.1";
 
 const HELP = `
   \x1b[1mdownbeat\x1b[0m — one song, every phone, the same millisecond
@@ -230,7 +230,7 @@ function startUI(hostArgs: string[]) {
     // Whatever went wrong is worth more on the real screen than on one that is
     // about to be thrown away.
     if (exited && exited.code !== 0 && exited.code !== null) {
-      process.stderr.write(`downbeat-core beendet (${exited.reason})\n`);
+      process.stderr.write(`downbeat-core exited (${exited.reason})\n`);
       for (const line of complaints) process.stderr.write(`  ${line}\n`);
     }
   };

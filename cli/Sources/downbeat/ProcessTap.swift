@@ -67,7 +67,14 @@ final class ProcessTap {
             guard let obj = Self.processObject(forPID: pid) else { throw TapError.processNotFound(pid) }
             description = CATapDescription(stereoMixdownOfProcesses: [obj])
         } else {
-            description = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+            // A system-wide tap MUST exclude this process, or Downbeat's own
+            // local playback is captured again: the room replays what it just
+            // played, `bufferMs` later, forever -- a feedback loop. Excluding
+            // us also exempts our output from the tap's mute, which is what
+            // keeps local playback audible while everything else is silenced.
+            let own = Self.processObject(forPID: ProcessInfo.processInfo.processIdentifier)
+            description = CATapDescription(
+                stereoGlobalTapButExcludeProcesses: own.map { [$0] } ?? [])
         }
         description.name = "Downbeat"
         description.isPrivate = true

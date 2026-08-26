@@ -52,7 +52,7 @@ func runSelfTest(pid: pid_t?, seconds: Double) -> Never {
         print("Bitrate         \(String(format: "%.0f", Double(bytes) * 8 / audioSeconds / 1000)) kbit/s")
         print("message rate    \(String(format: "%.0f", Double(packets.count) / audioSeconds)) /s")
         let expected = Int(audioSeconds * tap.format.sampleRate) / encoder.framesPerPacket
-        print("completeness    \(packets.count)/\(expected) Pakete")
+        print("completeness    \(packets.count)/\(expected) packets")
         print(packets.count >= expected - 1 ? "PASS  the encoder produces a gapless stream"
                                             : "FAIL  packets are missing")
         exit(packets.count >= expected - 1 ? 0 : 1)

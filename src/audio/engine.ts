@@ -722,6 +722,18 @@ export class LivePlayer {
     const view = new DataView(frame);
     const playAt = view.getFloat64(0, true);
     const sampleIndex = view.getFloat64(8, true);
+
+    // Do not anchor -- or even initialise the mapping -- on a clock that has
+    // not converged. The first probes land over the opening second, and a
+    // binary frame can beat the first pong to this handler; `toRoom` is then
+    // wrong by the entire room offset, and `k` slews far too slowly to ever
+    // walk that off, so seeding it here would break playback permanently
+    // rather than briefly. Waiting costs a moment of silence; not waiting
+    // costs being audibly out of step with the room, or worse.
+    if (!this.anchored && !this.clock.synced) {
+      this.stats.waiting++;
+      return;
+    }
     this.trackMapping();
 
     const margin = playAt - this.clock.now();
@@ -729,17 +741,6 @@ export class LivePlayer {
     if (margin < -200) {
       // Far past its moment. Writing it would only stamp on newer audio.
       this.stats.late++;
-      return;
-    }
-
-    // Do not anchor on a clock that has not converged. The first probes land
-    // over the opening second, and anchoring before then fixes the stream to a
-    // position that can be hundreds of milliseconds wrong -- which only a hard
-    // resync would ever recover, and which is exactly what a device joining
-    // mid-song would experience. Waiting costs a moment of silence; not
-    // waiting costs being audibly out of step with the room.
-    if (!this.anchored && !this.clock.synced) {
-      this.stats.waiting++;
       return;
     }
 

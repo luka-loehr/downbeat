@@ -146,9 +146,19 @@ class LiveProcessor extends AudioWorkletProcessor {
   }
 
   zero(fromFrame, toFrame) {
-    for (let c = 0; c < this.channels; c++) {
-      const ring = this.ring[c];
-      for (let f = fromFrame; f < toFrame; f++) ring[f & MASK] = 0;
+    // This runs on the render thread, so it must be cheap even when the hole
+    // is huge -- a listener whose network was gone for minutes hands us one.
+    if (toFrame - fromFrame >= RING_FRAMES) {
+      for (let c = 0; c < this.channels; c++) this.ring[c].fill(0);
+      return;
+    }
+    let offset = fromFrame & MASK;
+    let remaining = toFrame - fromFrame;
+    while (remaining > 0) {
+      const chunk = Math.min(remaining, RING_FRAMES - offset);
+      for (let c = 0; c < this.channels; c++) this.ring[c].fill(0, offset, offset + chunk);
+      offset = (offset + chunk) & MASK;
+      remaining -= chunk;
     }
   }
 

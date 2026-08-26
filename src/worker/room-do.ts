@@ -45,8 +45,17 @@ const EMPTY: Persisted = {
   live: null,
 };
 
+/**
+ * Telemetry and joins/leaves only need to reach the room eventually; at most
+ * one full-state broadcast per this window keeps a big room's chatter linear
+ * instead of quadratic. Transport changes still broadcast immediately.
+ */
+const STATE_COALESCE_MS = 750;
+
 export class RoomDO implements DurableObject {
   private p: Persisted = { ...EMPTY };
+  private stateTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastStateAt = 0;
 
   constructor(
     private readonly ctx: DurableObjectState,
@@ -110,7 +119,9 @@ export class RoomDO implements DurableObject {
       state: this.snapshot(),
       v: PROTOCOL_VERSION,
     });
-    this.broadcastState();
+    // The joiner already has the state in its welcome; the rest of the room
+    // only needs the membership change eventually, even during a join wave.
+    this.broadcastStateSoon();
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -160,14 +171,14 @@ export class RoomDO implements DurableObject {
         a.startError = msg.startError;
         a.playoutMs = msg.playoutMs ?? null;
         ws.serializeAttachment(a);
-        this.broadcastState();
+        this.broadcastStateSoon();
         return;
 
       case "ready":
         if (msg.seq !== this.p.seq) return; // stale arm, ignore
         a.readyFor = msg.trackId;
         ws.serializeAttachment(a);
-        this.broadcastState();
+        this.broadcastStateSoon();
         await this.maybeArm(t1);
         return;
 
@@ -196,11 +207,11 @@ export class RoomDO implements DurableObject {
       await this.save();
       this.broadcast({ t: "live", live: null });
     }
-    this.broadcastState();
+    this.broadcastStateSoon();
   }
 
   async webSocketError(): Promise<void> {
-    this.broadcastState();
+    this.broadcastStateSoon();
   }
 
   /** Arm timeout: start without the stragglers rather than hanging forever. */
@@ -412,7 +423,32 @@ export class RoomDO implements DurableObject {
   }
 
   private broadcastState(): void {
+    this.lastStateAt = Date.now();
+    if (this.stateTimer !== null) {
+      clearTimeout(this.stateTimer);
+      this.stateTimer = null;
+    }
     this.broadcast({ t: "state", state: this.snapshot() });
+  }
+
+  /**
+   * Coalesced state broadcast, for the chatty paths: with N devices each
+   * reporting telemetry every two seconds, broadcasting the full member list
+   * to all N on every report is N²/2 member-entries per second -- the thing
+   * that actually caps how many devices a room can hold. A timer that is
+   * lost to hibernation is fine: the next report re-schedules it.
+   */
+  private broadcastStateSoon(): void {
+    if (this.stateTimer !== null) return;
+    const since = Date.now() - this.lastStateAt;
+    if (since >= STATE_COALESCE_MS) {
+      this.broadcastState();
+      return;
+    }
+    this.stateTimer = setTimeout(() => {
+      this.stateTimer = null;
+      this.broadcastState();
+    }, STATE_COALESCE_MS - since);
   }
 }
 

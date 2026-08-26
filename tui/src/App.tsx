@@ -366,7 +366,7 @@ function JoinCard({ layout, room, config, width }: BodyProps & { width: number }
           />
           <Field
             label="Format"
-            value={config ? `${Math.round(config.sampleRate / 1000)} kHz ${G.dot} ${config.channels === 2 ? "Stereo" : `${config.channels} Kanäle`}` : "—"}
+            value={config ? `${Math.round(config.sampleRate / 1000)} kHz ${G.dot} ${config.channels === 2 ? "Stereo" : `${config.channels} channels`}` : "—"}
             width={width}
             color={C.muted}
           />
@@ -403,7 +403,7 @@ function Header({
 }) {
   const uptime = duration(status?.uptimeSec ?? 0);
   const count = members.length;
-  const devices = count === 1 ? "1 GERÄT" : `${count} GERÄTE`;
+  const devices = count === 1 ? "1 DEVICE" : `${count} DEVICES`;
   const right = `${phase.glyph} ${phase.label}`;
   const rightWidth = right.length + 3 + devices.length + 3 + uptime.length;
   const brand = `${G.brand}DOWNBEAT`;
@@ -587,13 +587,13 @@ function derivePhase(input: {
     const note = starving
       ? "buffer running dry — the source is not keeping up"
       : reanchoring
-        ? "Uhr neu verankert — Wiedergabe wurde nachgezogen"
+        ? "clock re-anchored — playback was pulled back into step"
         : !status.synced
           ? "no clock sync with the room"
           : "a speaker is out of step";
     return {
       key: "degraded",
-      label: "GESTÖRT",
+      label: "DEGRADED",
       glyph: G.warnMark,
       color: C.warn,
       note,
@@ -606,12 +606,12 @@ function derivePhase(input: {
     return { key: "synced", label: "LOCAL", glyph: G.locked, color: C.pulse, note: "offline — this Mac only", offline };
   }
   if (!status.synced || !primed) {
-    return { key: "connecting", label: "CONNECTING", glyph: G.waiting, color: C.warn, note: "Uhr wird eingemessen…", offline };
+    return { key: "connecting", label: "CONNECTING", glyph: G.waiting, color: C.warn, note: "measuring the clock…", offline };
   }
   if (!members.length) {
     return {
       key: "waiting",
-      label: "BEREIT",
+      label: "READY",
       glyph: G.waiting,
       color: C.pulse,
       note: room?.url,

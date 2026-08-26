@@ -166,7 +166,7 @@ if CommandLine.arguments.dropFirst().first == "selftest-qr" {
     print(TerminalQR.render(modules))
     print("modules         \(modules.count)x\(modules.first?.count ?? 0)")
     let decoded = TerminalQR.decodes(modules, to: sample)
-    print("decoded back    \(decoded ?? "NICHTS")")
+    print("decoded back    \(decoded ?? "NOTHING")")
     print(decoded == sample ? "PASS  the printed pattern is a scannable QR code"
                             : "FAIL  the pattern is not readable")
     exit(decoded == sample ? 0 : 1)
@@ -207,6 +207,16 @@ nonisolated(unsafe) var player: LocalPlayer?
 nonisolated(unsafe) var transport: Transport?
 nonisolated(unsafe) var anchorLocalMs: Double = 0
 nonisolated(unsafe) var anchored = false
+/**
+ Latest (host-time ms, frames-written) pair from the capture callback.
+
+ The stream timeline is nominally `anchor + frames / rate`, but the capture
+ device runs on its own crystal: at 10 ppm that mapping is 36 ms wrong after
+ an hour and 360 ms after ten. This pair is the measurement that lets both the
+ encoder and the local player correct for it. Packed into one double-wide
+ atomic so a reader can never pair a fresh time with a stale frame count.
+ */
+let captureProgress = Atomic<WordPair>(WordPair(first: 0, second: 0))
 /// Touched from the URLSession delegate queue and read by the status loop.
 let listenerCount = Atomic<Int>(0)
 /// Scratch for the clamp path; sized well beyond any device's buffer.
@@ -246,14 +256,21 @@ if !options.offline {
  block. Everything it touches is either atomic or the lock-free ring.
  */
 @Sendable func captureCallback(_ samples: UnsafePointer<Float>, _ frames: Int, _ hostTime: UInt64) {
+    let localMs = RoomClock.localMs(hostTime: hostTime)
     if !anchored {
-        anchorLocalMs = RoomClock.localMs(hostTime: hostTime)
+        anchorLocalMs = localMs
         anchored = true
     }
     if let p = player, !p.anchored {
         p.anchorLocalMs = anchorLocalMs
         p.anchored = true
     }
+    // Real progress: at host time `localMs`, exactly this many frames existed.
+    // The buffer's own hardware timestamp, not the time this thread ran.
+    captureProgress.store(
+        WordPair(first: UInt(localMs.bitPattern),
+                 second: UInt(bitPattern: Int(ring.framesWritten))),
+        ordering: .releasing)
     // Capturing the whole system sums every app, and two players at once
     // routinely exceeds full scale -- measured +6.7 dBFS with Music and
     // Spotify together. Opus handles out-of-range samples badly, so clamp
@@ -302,6 +319,24 @@ do {
 let rate = tap.format.sampleRate
 let channels = tap.format.channels
 
+/**
+ How far the nominal-rate stream timeline has drifted from the capture
+ device's real progress, in ms. Positive means the device is running slow.
+
+ Fed to the encoder (into the packet timestamps, slewed) and to the local
+ player (into its read target, slewed at the same limit), so this Mac and
+ every phone keep aiming at the same instant no matter how long the session
+ runs or how honest the capture crystal is.
+ */
+@Sendable func timelineErrorMs() -> Double {
+    guard anchored else { return 0 }
+    let pair = captureProgress.load(ordering: .acquiring)
+    guard pair.first != 0 else { return 0 }
+    let hostMs = Double(bitPattern: UInt64(pair.first))
+    let frames = Double(Int(bitPattern: pair.second))
+    return hostMs - (anchorLocalMs + frames / rate * 1000)
+}
+
 if options.playLocally {
     let p = LocalPlayer(ring: ring, clock: clock, sampleRate: rate,
                         channels: channels, bufferMs: options.bufferMs)
@@ -309,6 +344,7 @@ if options.playLocally {
         p.anchorLocalMs = anchorLocalMs
         p.anchored = true
     }
+    p.timelineError = { timelineErrorMs() }
     player = p
     do { try p.start() } catch { tap.stop(); die("\(error)") }
 }
@@ -361,7 +397,12 @@ if let t = transport {
             let packets = (try? ownedEncoder.encode(scratch, frames: frameSize)) ?? []
             for packet in packets {
                 if !offsetPrimed { streamOffset = clock.offset; offsetPrimed = true }
-                let target = clock.offset
+                // Two corrections share the walk: the room-clock offset, and
+                // the drift of the nominal-rate timeline against the capture
+                // device's real progress. Folding the second one in is what
+                // stops the whole room sliding against real time -- and
+                // eating the delay budget -- over a many-hour session.
+                let target = clock.offset + timelineErrorMs()
                 streamOffset += max(-maxStep, min(maxStep, target - streamOffset))
                 // This packet's first sample was captured here:
                 let captureRoomMs = anchorLocalMs
@@ -564,7 +605,7 @@ while true {
         let db = peak > 0 ? String(format: "%6.1f dBFS", peakDb) : "  -inf dBFS"
         let sync = transport == nil ? "offline"
             : (clock.isSynced ? String(format: "±%.1fms", clock.uncertainty) : "sync…")
-        print(String(format: "  %@  captured %5.1fs  Pakete %5d  %5.0f kbit/s  Uhr %@  starved %d",
+        print(String(format: "  %@  captured %5.1fs  packets %5d  %5.0f kbit/s  clock %@  starved %d",
                      db, Double(captured) / rate, sent, kbits, sync, player?.starvedFrames ?? 0))
     }
 }

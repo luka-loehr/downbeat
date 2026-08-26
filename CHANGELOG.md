@@ -3,6 +3,53 @@
 All notable changes to this project, with the conditions under which each
 measurement was taken.
 
+## [0.2.1] — 2026-08-26
+
+The ten-hour session: every drift source that only shows up after hours is
+now closed, and capturing the whole system no longer feeds Downbeat back
+into itself.
+
+### Fixed
+- **System capture no longer loops.** The system-wide tap excluded no
+  processes, so Downbeat's own local playback was captured again and replayed
+  `bufferMs` later, forever. The tap now excludes the Downbeat process, which
+  also exempts its output from the tap's mute — local monitoring stays audible
+  while everything else is silenced at the speaker.
+- **The Mac no longer saws against the phones.** Local playback advanced its
+  read head with the output device's clock but placed it with the CPU clock,
+  reconciling only when 30 ms apart — a sawtooth of up to 30 ms against the
+  phones with an audible click at each reset, roughly hourly per 10 ppm of
+  crystal difference. The read head is now fractional and steered every
+  callback by the same PI law and constants as the browser worklet, with the
+  same Catmull-Rom interpolation.
+- **The stream timeline is disciplined to real capture progress.** Packet
+  timestamps assumed the capture device delivers exactly nominal rate; per
+  10 ppm of crystal error the whole room slid 36 ms per hour against real
+  time, silently eating the delay budget on multi-hour sessions. The encoder
+  now measures the drift against the capture buffers' own hardware timestamps
+  and folds it into the existing slewed offset; the local player applies the
+  identical correction, so Mac and phones keep aiming at the same instant
+  indefinitely.
+- Live playback could seed its room↔context mapping from a clock that had not
+  converged when a binary frame beat the first pong to the socket handler —
+  an offset error the mapping's deliberately sluggish slew could never walk
+  off. The mapping is now only ever touched after the clock has converged.
+- The CLI clock starts a fresh probe burst after a reconnect instead of
+  letting the old path's history outvote the new path's truth for minutes.
+- A stalled network can no longer queue unbounded audio in the CLI transport:
+  past ~2.5 s of backlog, packets are dropped and counted rather than
+  delivered too late to be played.
+- Zeroing a ring hole after a long outage is bounded and vectorised in the
+  worklet, so a listener returning from minutes offline cannot glitch the
+  render thread.
+
+### Changed
+- Room state broadcasts are coalesced to at most one per 750 ms for telemetry,
+  joins and leaves. With N devices each reporting every two seconds the old
+  behaviour was N²/2 member-entries per second across the room — the actual
+  ceiling on room size. Transport changes still broadcast immediately.
+- The last German strings in the terminal UI and CLI are English.
+
 ## [0.2.0] — 2026-08-23
 
 Zero steady-state drift, runtime control, and every browser.
