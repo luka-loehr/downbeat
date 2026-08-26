@@ -1,0 +1,7 @@
+# Cross-origin isolation, so pages can use SharedArrayBuffer: live audio is
+# handed to the output thread through shared memory, not messages. Served on
+# every asset, because exact asset matches are answered BEFORE the Worker
+# runs — the header-adding code in src/worker/index.ts never sees them.
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
