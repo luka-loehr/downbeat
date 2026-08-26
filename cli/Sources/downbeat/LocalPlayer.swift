@@ -24,8 +24,11 @@ import AudioToolbox
 private let TAU_S = 1.5
 /// Integral time constant; what drives a constant crystal offset to ZERO.
 private let TAU_INTEGRAL_S = 8.0
-/// Steady-state correction ceiling: 0.2 % is ~3.5 cents, inaudible.
-private let MAX_RATE_DEV = 0.002
+/// Steady-state correction ceiling: 0.3 % is ~5 cents, inaudible on music,
+/// and -- same as the worklet -- leaves real authority for a budget trim,
+/// clock slew and crystal offset landing at once. A ceiling exactly equal to
+/// the trim rate saturates, ratchets to the recovery threshold and warbles.
+private let MAX_RATE_DEV = 0.003
 /// After a real dislocation, pull harder rather than be out of step for a minute.
 private let RECOVERY_RATE_DEV = 0.01
 private let RECOVERY_THRESHOLD_S = 0.020

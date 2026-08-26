@@ -57,6 +57,14 @@ export interface Member {
    * in the room says how much cushion is actually spare.
    */
   marginMs?: number | null;
+  /**
+   * Worst ring cushion over the last couple of seconds, ms: the least audio
+   * that sat between this member's read head and the freshest write. This is
+   * the number that actually predicts crackle -- arrival margin minus decode
+   * latency, hardware output latency and every jitter spike -- and it is what
+   * the source's adaptive delay budget must keep healthy.
+   */
+  cushionMs?: number | null;
   /** Cumulative output frames this member's live ring could not fill. */
   underruns?: number | null;
 }
@@ -116,6 +124,7 @@ export type ClientMessage =
       startError: number | null;
       playoutMs?: number | null;
       marginMs?: number | null;
+      cushionMs?: number | null;
       underruns?: number | null;
     }
   | { t: "cmd"; cmd: HostCommand };

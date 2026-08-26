@@ -587,29 +587,35 @@ if options.json {
 
 let started = RoomClock.localNow()
 let statusInterval = options.json ? 0.2 : 1.0
-/// Aim to keep the weakest listener this far ahead of its deadline.
-let safeMarginMs = 300.0
-/// Trim gently -- 2 ms/s is inside every drift controller's inaudible band --
-/// but grow an order of magnitude faster: cushion during trouble cannot wait.
-let trimMsPerSecond = 2.0
-let growMsPerSecond = 25.0
+/// Aim to keep the weakest listener's WORST ring cushion this healthy. The
+/// cushion is measured at the point of consumption, so decode latency,
+/// hardware output latency and every jitter dip are already inside it --
+/// arrival margin is not, which is why steering on it caused crackle.
+let safeCushionMs = 250.0
+/// Trim at a third of the 0.3 % steady correction ceiling, so every device
+/// tracks the moving schedule with authority to spare (a rate equal to the
+/// ceiling saturates the controllers and they warble). Growth deliberately
+/// exceeds the steady ceiling -- it is an emergency -- but stays inside the
+/// 1 % recovery band, slewed on the shared value rather than stepped.
+let trimMsPerSecond = 1.0
+let growMsPerSecond = 6.0
 var lastUnderrunTotal = 0
 while true {
     Thread.sleep(forTimeInterval: statusInterval)
 
     // ---- adaptive delay budget -------------------------------------------
     //
-    // Each listener reports how far ahead of its deadline packets arrive and
-    // how many output frames its ring failed to fill. The budget chases the
-    // smallest value that still leaves the weakest listener `safeMarginMs` in
-    // hand; an underrun anywhere is an immediate demand for more cushion.
+    // Each listener reports the least audio its ring held recently and how
+    // many output frames it failed to fill. The budget chases the smallest
+    // value that keeps the weakest listener `safeCushionMs` in hand; an
+    // underrun anywhere is an immediate demand for more.
     if options.adapt, let t = transport {
         let current = Double(bitPattern: adaptiveBufferMs.load(ordering: .relaxed))
-        let margin = t.minListenerMarginMs
-        if !margin.isNaN {
-            var target = current + (safeMarginMs - margin)
+        let cushion = t.minListenerCushionMs
+        if !cushion.isNaN {
+            var target = current + (safeCushionMs - cushion)
             let underruns = t.totalListenerUnderruns
-            if underruns > lastUnderrunTotal { target = max(target, current + 400) }
+            if underruns > lastUnderrunTotal { target = max(target, current + 300) }
             lastUnderrunTotal = underruns
             target = min(max(target, minBufferMs), maxBufferMs)
             let delta = target - current
@@ -637,7 +643,7 @@ while true {
 
     if options.json {
         if secs % 3 == 0 { emitSources() }
-        Events.emit([
+        var payload: [String: Any] = [
             "t": "status",
             "peakDb": peakDb,
             "capturedSec": Double(captured) / rate,
@@ -661,7 +667,12 @@ while true {
             "uptimeSec": secs,
             // dBFS per ~10 ms of capture, oldest first.
             "levels": levels.map { $0 > 0 ? 20 * log10(Double($0)) : -120.0 },
-        ])
+        ]
+        payload["timelineErrMs"] = timelineErrorMs()
+        if let t = transport, !t.minListenerCushionMs.isNaN {
+            payload["cushionMs"] = t.minListenerCushionMs
+        }
+        Events.emit(payload)
     } else {
         let db = peak > 0 ? String(format: "%6.1f dBFS", peakDb) : "  -inf dBFS"
         let sync = transport == nil ? "offline"

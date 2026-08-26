@@ -42,7 +42,7 @@ if (!core) {
 /** Subcommands that are plain, interactive, or both -- run them as themselves. */
 const PASSTHROUGH = new Set(["login", "logout", "selftest", "selftest-qr"]);
 
-const VERSION = "0.3.0";
+const VERSION = "0.3.1";
 
 const HELP = `
   \x1b[1mdownbeat\x1b[0m — one song, every phone, the same millisecond

@@ -1,5 +1,5 @@
 import type { SyncedClock } from "./clock";
-import { clamp } from "./clock";
+import { clamp, median } from "./clock";
 import { loadDeviceOffset, outputLatency, saveDeviceOffset } from "./latency";
 import { LIVE_HEADER_BYTES } from "../shared/protocol";
 import { WORKLET_VERSION } from "../shared/build";
@@ -461,6 +461,12 @@ export interface LiveStats {
   underruns: number;
   /** Audio sitting ahead of the play head, ms. */
   aheadMs: number;
+  /**
+   * The WORST ring-ahead over the last couple of seconds, ms. The mean hides
+   * the dips; this is the number that predicts crackle, and the one the
+   * source's adaptive delay budget steers by.
+   */
+  cushionMs: number | null;
   /** How far the fixed anchor has drifted from the room clock, ms. */
   anchorErrorMs: number;
   /** Times the anchor had to be reset -- each one is a single discontinuity. */
@@ -607,9 +613,18 @@ export class LivePlayer {
   private anchorErrorMs = 0;
   private appliedRate = 1;
   private resyncs = 0;
+  /** Worst-ahead reports from the worklet, ~100 ms apart; a rolling window. */
+  private aheadWindow: number[] = [];
+  /** Recent k measurements that disagree with the applied k; see trackMapping. */
+  private kOutliers: number[] = [];
+  /** One-shot: tell the worklet to snap to its target instead of steering. */
+  private requestJump = false;
+  /** Re-seed the margin EMA on the next packet -- after a dislocation the
+   *  history describes a world that no longer exists. */
+  private reseedMargin = false;
 
   private stats: LiveStats = {
-    decoded: 0, late: 0, marginMs: 0, underruns: 0, aheadMs: 0,
+    decoded: 0, late: 0, marginMs: 0, underruns: 0, aheadMs: 0, cushionMs: null,
     anchorErrorMs: 0, reanchors: 0, rate: 1, waiting: 0,
   };
 
@@ -639,8 +654,12 @@ export class LivePlayer {
   }
 
   getStats(): LiveStats {
+    const streamRate = this.config?.sampleRate ?? 48000;
     return {
       ...this.stats,
+      cushionMs: this.aheadWindow.length
+        ? (Math.min(...this.aheadWindow) / streamRate) * 1000
+        : null,
       anchorErrorMs: this.anchorErrorMs,
       rate: this.appliedRate,
       reanchors: this.resyncs,
@@ -664,12 +683,16 @@ export class LivePlayer {
     this.stop();
     this.config = config;
     this.stats = {
-      decoded: 0, late: 0, marginMs: 0, underruns: 0, aheadMs: 0,
+      decoded: 0, late: 0, marginMs: 0, underruns: 0, aheadMs: 0, cushionMs: null,
       anchorErrorMs: 0, reanchors: 0, rate: 1, waiting: 0,
     };
     this.kInit = false;
     this.anchored = false;
     this.resyncs = 0;
+    this.aheadWindow = [];
+    this.kOutliers = [];
+    this.requestJump = false;
+    this.reseedMargin = false;
 
     if (!this.moduleLoaded) {
       // Fingerprinted so a cached copy from an earlier deploy can never be
@@ -682,21 +705,31 @@ export class LivePlayer {
       numberOfInputs: 0,
       numberOfOutputs: 1,
       outputChannelCount: [config.channels],
-      processorOptions: { channels: config.channels },
+      // The worklet counts positions in STREAM samples so a context that
+      // refused 48 kHz still places and consumes audio correctly.
+      processorOptions: { channels: config.channels, streamRate: config.sampleRate },
     });
     node.port.onmessage = (event) => {
       const data = event.data as {
         type: string;
         underruns: number;
         ahead: number;
+        minAhead: number | null;
         errFrames: number;
         rate: number;
         resyncs: number;
       };
       if (data.type !== "stats") return;
+      const streamRate = config.sampleRate;
       this.stats.underruns = data.underruns;
-      this.stats.aheadMs = (data.ahead / this.ctx.sampleRate) * 1000;
-      this.anchorErrorMs = (data.errFrames / this.ctx.sampleRate) * 1000;
+      this.stats.aheadMs = (data.ahead / streamRate) * 1000;
+      if (data.minAhead !== null && data.minAhead !== undefined) {
+        this.aheadWindow.push(data.minAhead);
+        // ~2 s of 100 ms reports: long enough to catch a jitter burst,
+        // short enough that recovery is visible within a telemetry cycle.
+        if (this.aheadWindow.length > 20) this.aheadWindow.shift();
+      }
+      this.anchorErrorMs = (data.errFrames / streamRate) * 1000;
       this.appliedRate = data.rate;
       this.resyncs = data.resyncs;
     };
@@ -748,16 +781,26 @@ export class LivePlayer {
     this.trackMapping();
 
     const margin = playAt - this.clock.now();
-    this.stats.marginMs = this.stats.marginMs * 0.95 + margin * 0.05;
+    if (this.reseedMargin) {
+      // After a dislocation the EMA describes a world that no longer exists,
+      // and feeding its ghost to the source's adaptive budget would move the
+      // whole room's latency on one sleeping phone's say-so.
+      this.stats.marginMs = margin;
+      this.reseedMargin = false;
+    } else {
+      this.stats.marginMs = this.stats.marginMs * 0.95 + margin * 0.05;
+    }
     if (margin < -200) {
       // Far past its moment. Writing it would only stamp on newer audio.
       this.stats.late++;
       return;
     }
 
-    // Where the room clock says this sample belongs, right now.
+    const streamRate = this.config?.sampleRate ?? this.ctx.sampleRate;
+    // Where the room clock says this sample belongs, right now -- in STREAM
+    // samples, the unit the ring is indexed by.
     const wanted = Math.round(
-      (playAt / 1000 + this.k - this.deviceOffsetMs() / 1000) * this.ctx.sampleRate,
+      (playAt / 1000 + this.k - this.deviceOffsetMs() / 1000) * streamRate,
     );
     if (!this.anchored) {
       this.frameOffset = wanted - sampleIndex;
@@ -765,6 +808,7 @@ export class LivePlayer {
       this.anchorSample = sampleIndex;
       this.timelineDriftMs = 0;
       this.anchored = true;
+      this.requestJump = true;
     } else if (this.config) {
       const line =
         this.anchorPlayAt +
@@ -772,16 +816,19 @@ export class LivePlayer {
       const residual = playAt - line;
       if (Math.abs(residual - this.timelineDriftMs) > 500) {
         // The timeline itself dislocated -- a source suspend, a clock step.
-        // Re-anchor on this packet rather than slewing for minutes; the
-        // worklet notices the target jump and hard-resyncs once.
+        // Re-anchor on this packet rather than slewing for minutes, and have
+        // the worklet snap once instead of pitch-bending toward the target.
         this.frameOffset = wanted - sampleIndex;
         this.anchorPlayAt = playAt;
         this.anchorSample = sampleIndex;
         this.timelineDriftMs = 0;
+        this.requestJump = true;
+        this.reseedMargin = true;
       } else {
-        // 0.15 ms per packet is 7.5 ms/s -- comfortably above everything the
-        // source is allowed to do to the stamps, yet far below audibility.
-        this.timelineDriftMs += clamp(residual - this.timelineDriftMs, -0.15, 0.15);
+        // 0.25 ms per packet is 12.5 ms/s -- comfortably above everything the
+        // source is allowed to do to the stamps (1 ms/s trim, 6 ms/s growth,
+        // 2 ms/s clock slew), yet far below audibility.
+        this.timelineDriftMs += clamp(residual - this.timelineDriftMs, -0.25, 0.25);
       }
     }
 
@@ -789,6 +836,10 @@ export class LivePlayer {
     // there every render quantum; nothing here ever moves audio, so the
     // placement of packets stays exactly contiguous.
     this.postSyncPoint();
+    if (this.requestJump && this.node) {
+      this.node.port.postMessage({ type: "jump" });
+      this.requestJump = false;
+    }
 
     source.decode(new Uint8Array(frame, LIVE_HEADER_BYTES), sampleIndex);
   }
@@ -802,8 +853,12 @@ export class LivePlayer {
    */
   private postSyncPoint(): void {
     const node = this.node;
-    if (!node || !this.anchored) return;
-    const rate = this.ctx.sampleRate;
+    if (!node || !this.anchored || !this.config) return;
+    // Ring positions are stream samples; the frame stamp is output frames.
+    // Mixing the two rates -- on a context that refused 48 kHz -- tears the
+    // target away from the data at their difference, thousands of frames a
+    // second, as repeated hard resyncs plus a pitch shift.
+    const streamRate = this.config.sampleRate;
     // Read the clock ONCE. The pair below is only meaningful if both halves
     // describe the same instant; two reads can straddle a render quantum and
     // inject 2.7 ms of pure noise into the controller's target.
@@ -813,11 +868,11 @@ export class LivePlayer {
     const heardNowMs = (now - this.k) * 1000;
     const wantedSample =
       this.anchorSample +
-      ((heardNowMs - this.anchorPlayAt - this.timelineDriftMs) / 1000) * rate;
+      ((heardNowMs - this.anchorPlayAt - this.timelineDriftMs) / 1000) * streamRate;
 
     node.port.postMessage({
       type: "sync",
-      frame: Math.round(now * rate),
+      frame: Math.round(now * this.ctx.sampleRate),
       ring: wantedSample + this.frameOffset,
     });
   }
@@ -838,6 +893,30 @@ export class LivePlayer {
       this.kInit = true;
       return;
     }
+
+    // Dislocation detector. A slept phone resumes with its context clock
+    // frozen behind the room clock; a route change moves the output latency;
+    // a clock step moves toRoom -- all of them shift the true k by far more
+    // than drift ever could, and the slew below would spend a MINUTE walking
+    // off what should be one clean correction (the "completely out of sync,
+    // fine a minute later" bug). Three consecutive disagreeing measurements
+    // rule out a one-off timestamp glitch; then step k to their median, drop
+    // the anchor so the stream re-locks against the corrected mapping, and
+    // let the worklet snap once.
+    if (Math.abs(sample - this.k) > 0.03) {
+      this.kOutliers.push(sample);
+      if (this.kOutliers.length >= 3) {
+        this.k = median(this.kOutliers);
+        this.kOutliers = [];
+        this.anchored = false;
+        this.timelineDriftMs = 0;
+        this.aheadWindow = [];
+        this.reseedMargin = true;
+      }
+      return;
+    }
+    this.kOutliers = [];
+
     // Deliberately sluggish. k only needs to track real clock drift, which is
     // measured in parts per million; anything faster is measurement noise being
     // written into the audio timeline.

@@ -648,6 +648,15 @@ function telemetryStats({ status, config, phase }: BodyProps): Stat[] {
       color: phase.key === "degraded" ? C.warn : C.muted,
     },
   ];
+  if (status && status.cushionMs !== undefined && status.cushionMs !== null) {
+    // The one number that predicts crackle: the least audio any listener had
+    // in hand recently. Healthy is a few hundred ms; double digits is danger.
+    stats.splice(5, 0, {
+      label: "CUSHION",
+      value: `${Math.round(status.cushionMs)} ms`,
+      color: status.cushionMs < 150 ? C.warn : C.muted,
+    });
+  }
   if (status && status.reanchors > 0) {
     stats.splice(4, 0, { label: "RESYNC", value: group(status.reanchors), color: C.warn });
   }

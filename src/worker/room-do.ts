@@ -33,6 +33,7 @@ interface Attach {
   startError: number | null;
   playoutMs: number | null;
   marginMs: number | null;
+  cushionMs: number | null;
   underruns: number | null;
 }
 
@@ -112,6 +113,7 @@ export class RoomDO implements DurableObject {
       startError: null,
       playoutMs: null,
       marginMs: null,
+      cushionMs: null,
       underruns: null,
     };
     server.serializeAttachment(attach);
@@ -179,6 +181,7 @@ export class RoomDO implements DurableObject {
         a.startError = msg.startError;
         a.playoutMs = msg.playoutMs ?? null;
         a.marginMs = msg.marginMs ?? null;
+        a.cushionMs = msg.cushionMs ?? null;
         a.underruns = msg.underruns ?? null;
         ws.serializeAttachment(a);
         this.broadcastStateSoon();

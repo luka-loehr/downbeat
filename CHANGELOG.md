@@ -3,6 +3,51 @@
 All notable changes to this project, with the conditions under which each
 measurement was taken.
 
+## [0.3.1] — 2026-08-26
+
+The crackle, the warble, and the minute of being out of sync — all three
+traced to root cause by control-loop analysis and closed.
+
+### Fixed
+- **Crackle on every listener while the host stayed clean.** The adaptive
+  budget steered on *arrival* margin, which never sees decode latency,
+  hardware output latency (up to ~250 ms on Bluetooth) or jitter dips — so it
+  trimmed until the read head grazed the freshest write and every graze was a
+  click. The worklet now measures its own **worst-case ring cushion** every
+  quantum, listeners report the minimum over a rolling window, and the budget
+  keeps the weakest listener's worst dip at 250 ms. Arrival margin remains as
+  a diagnostic.
+- **Rate-control saturation (warble, and the host running ahead).** The trim
+  rate (2 ms/s) exactly equalled the steady correction ceiling (0.2 %), so
+  every device saturated, ratcheted to the 20 ms recovery threshold and
+  oscillated between 3.5 and 17 cents of correction, each lagging the moving
+  schedule by its own excess — the host least, so it led. The ceiling is now
+  0.3 % (≈5 cents, still inaudible) on both the worklet and the Mac, the trim
+  is 1 ms/s — a third of the authority — and growth is 6 ms/s slewed on the
+  shared value instead of a 25 ms/s step that exceeded even recovery
+  authority. An unsaturated PI tracks a ramp with zero steady-state error
+  (ζ≈0.94), so the schedule moves and nobody lags it.
+- **"Completely out of sync, fine a minute later."** A locked or interrupted
+  phone resumes with its audio clock frozen behind the room clock; the
+  room↔context mapping was only allowed to crawl back at 10 ms/s, so the
+  worklet hard-jumped to a *wrong* position and then audibly slewed for up to
+  a minute — or, after a 30 s lock, landed outside the ring entirely:
+  silence, the "reload the page" case. Three consecutive mapping measurements
+  disagreeing by >30 ms now **step** the mapping to their median, re-anchor
+  the stream once, and tell the worklet to snap in one clean jump. The clock
+  itself re-bursts the moment the tab or audio context wakes, stepping the
+  offset within one round trip instead of confirming a jump over 8 s of
+  keepalives — resume-to-in-sync is now under a second.
+- A context that refuses 48 kHz no longer desyncs at thousands of frames per
+  second with a hidden pitch shift: all ring positions, sync targets and
+  thresholds are in stream samples, and the read head advances at the
+  stream/context rate ratio.
+- A mid-song rejoin whose track download fails now retries on the next state
+  broadcast instead of staying silent for the whole track.
+- A dislocated listener's polluted margin history is re-seeded on re-lock, so
+  one sleeping phone can no longer inflate the whole room's latency; a packet
+  older than a ring rotation can no longer overwrite audio near the read head.
+
 ## [0.3.0] — 2026-08-26
 
 The delay budget steers itself, and every device follows the source's real

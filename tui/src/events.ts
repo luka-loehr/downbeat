@@ -51,6 +51,10 @@ export interface StatusEvent {
   synced: boolean;
   /** The adaptive delay budget as it currently stands, ms. */
   bufferMs?: number;
+  /** Worst ring cushion any listener reported recently, ms; null = no data. */
+  cushionMs?: number | null;
+  /** Drift of the nominal timeline vs the capture device's real progress, ms. */
+  timelineErrMs?: number;
   starved: number;
   reanchors: number;
   listeners: number;

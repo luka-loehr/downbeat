@@ -63,9 +63,13 @@ final class Transport: NSObject, @unchecked Sendable {
     }
     var onMembers: (@Sendable (MemberSnapshot) -> Void)?
 
-    /// Smallest live-arrival margin any listener reports, ms. NaN = nobody is
-    /// reporting one yet. This is the adaptive delay budget's steering signal.
+    /// Smallest live-arrival margin any listener reports, ms. Diagnostic only:
+    /// arrival margin hides decode and hardware latency. NaN = no reports.
     private(set) var minListenerMarginMs = Double.nan
+    /// Smallest worst-case ring cushion any listener reports, ms -- the least
+    /// audio anyone actually had in hand recently, and therefore the adaptive
+    /// delay budget's steering signal. NaN = nobody is reporting one yet.
+    private(set) var minListenerCushionMs = Double.nan
     /// Sum of the cumulative underrun counts across listeners.
     private(set) var totalListenerUnderruns = 0
 
@@ -298,6 +302,8 @@ final class Transport: NSObject, @unchecked Sendable {
             }
             let margins = speakers.compactMap { $0["marginMs"] as? Double }
             minListenerMarginMs = margins.min() ?? .nan
+            let cushions = speakers.compactMap { $0["cushionMs"] as? Double }
+            minListenerCushionMs = cushions.min() ?? .nan
             totalListenerUnderruns = speakers
                 .compactMap { $0["underruns"] as? Double }
                 .reduce(0) { $0 + Int($1) }

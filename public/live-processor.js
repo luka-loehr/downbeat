@@ -58,15 +58,36 @@ const TAU_INTEGRAL_SECONDS = 8;
  * step for a minute is far worse than a couple of seconds of 17-cent pitch
  * bend nobody will identify, so recovery is allowed to pull harder.
  */
-const MAX_RATE_DEVIATION = 0.002;
+/**
+ * 0.3 % is ~5 cents -- still inaudible on music, and the extra authority is
+ * the point: the budget must cover crystal offset (±0.01 %), receiver clock
+ * slew (±0.2 %) and the source's 0.1 % budget trim SIMULTANEOUSLY. The old
+ * 0.2 % ceiling was exactly consumed by a 2 ms/s trim alone, so every device
+ * saturated, ratcheted to the recovery threshold and warbled between the two
+ * ceilings -- audible, and each device lagged by its own excess.
+ */
+const MAX_RATE_DEVIATION = 0.003;
 const RECOVERY_RATE_DEVIATION = 0.01;
-const RECOVERY_THRESHOLD_FRAMES = 48000 * 0.02; // 20 ms
-const HARD_RESYNC_FRAMES = 48000 * 0.5; // beyond this, steering is hopeless
+const RECOVERY_THRESHOLD_S = 0.02;
+const HARD_RESYNC_S = 0.5; // beyond this, steering is hopeless
 
 class LiveProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
     this.channels = Math.max(1, options?.processorOptions?.channels ?? 2);
+    /**
+     * Everything positional -- ring indices, sync targets, thresholds -- is
+     * in STREAM samples. If the context refused 48 kHz, counting positions
+     * in output frames would tear the target away from the data at
+     * |streamRate − sampleRate| frames per second: a hard resync every few
+     * seconds plus a pitch shift, silently. The read head instead advances
+     * `ratio` stream samples per output frame, which the fractional
+     * interpolator handles for free.
+     */
+    this.streamRate = options?.processorOptions?.streamRate ?? sampleRate;
+    this.ratio = this.streamRate / sampleRate;
+    this.recoveryFrames = this.streamRate * RECOVERY_THRESHOLD_S;
+    this.hardFrames = this.streamRate * HARD_RESYNC_S;
     this.ring = [];
     for (let c = 0; c < this.channels; c++) this.ring.push(new Float32Array(RING_FRAMES));
 
@@ -90,6 +111,10 @@ class LiveProcessor extends AudioWorkletProcessor {
     this.syncW = 0;
     this.haveSync = false;
     this.errFrames = 0;
+    /** One-shot: snap to the target instead of steering toward it. */
+    this.jump = false;
+    /** Worst ring-ahead seen since the last stats report, stream frames. */
+    this.minAhead = Infinity;
 
     this.port.onmessage = (event) => this.onMessage(event.data);
   }
@@ -112,10 +137,22 @@ class LiveProcessor extends AudioWorkletProcessor {
       this.haveSync = true;
       return;
     }
+    if (msg.type === "jump") {
+      // A deliberate re-lock after a dislocation (device slept, clock
+      // stepped, route changed). Walking a known-correct target off at the
+      // recovery ceiling would be tens of seconds of pitch bend; one clean
+      // discontinuity is the lesser evil.
+      this.jump = true;
+      return;
+    }
     if (msg.type !== "audio") return;
 
     const { startFrame, planes } = msg;
     const frames = planes[0].length;
+    // A packet from more than a ring rotation ago must not stamp on audio
+    // sitting near the read head. Unreachable through the current push path,
+    // which drops far-late packets before decode -- this keeps it true.
+    if (this.started && startFrame + frames < this.readPos) return;
 
     // A hole means packets were lost or arrived too late. Zero it rather than
     // leaving whatever the ring held a rotation ago -- stale audio at full
@@ -162,9 +199,9 @@ class LiveProcessor extends AudioWorkletProcessor {
     }
   }
 
-  /** Where the read head should be at output frame `f`. */
+  /** Where the read head should be at output frame `f`, in stream samples. */
   target(f) {
-    return this.syncW + (f - this.syncF);
+    return this.syncW + (f - this.syncF) * this.ratio;
   }
 
   /**
@@ -204,11 +241,13 @@ class LiveProcessor extends AudioWorkletProcessor {
       return true;
     }
 
-    if (!this.started) {
+    if (!this.started || this.jump) {
       this.readPos = this.target(base);
       this.rate = 1;
       this.integral = 0;
+      if (this.started && this.jump) this.resyncs++;
       this.started = true;
+      this.jump = false;
     }
 
     // Steer, do not jump. The error is measured against the room clock's own
@@ -216,34 +255,37 @@ class LiveProcessor extends AudioWorkletProcessor {
     // is what keeps them in step with each other, not merely gap-free.
     const err = this.readPos - this.target(base);
     this.errFrames = err;
-    if (Math.abs(err) > HARD_RESYNC_FRAMES) {
+    if (Math.abs(err) > this.hardFrames) {
       this.readPos = this.target(base);
       this.rate = 1;
       this.integral = 0;
       this.resyncs++;
     } else {
       const ceiling =
-        Math.abs(err) > RECOVERY_THRESHOLD_FRAMES
+        Math.abs(err) > this.recoveryFrames
           ? RECOVERY_RATE_DEVIATION
           : MAX_RATE_DEVIATION;
 
       const dt = frames / sampleRate;
-      const proportional = -err / (TAU_SECONDS * sampleRate);
+      // A rate deviation of e moves the read head e * streamRate stream
+      // samples per second, so the gains are expressed in the stream domain.
+      const proportional = -err / (TAU_SECONDS * this.streamRate);
       // Anti-windup: an integrator allowed to grow past what the rate limit
       // can express would keep pushing long after the error was gone, and
       // overshoot. Bound it to exactly the authority available.
-      const integralLimit = ceiling * TAU_INTEGRAL_SECONDS * sampleRate;
+      const integralLimit = ceiling * TAU_INTEGRAL_SECONDS * this.streamRate;
       this.integral = Math.max(
         -integralLimit,
         Math.min(integralLimit, this.integral - err * dt),
       );
-      const integral = this.integral / (TAU_INTEGRAL_SECONDS * sampleRate);
+      const integral = this.integral / (TAU_INTEGRAL_SECONDS * this.streamRate);
 
       this.rate = 1 + Math.max(-ceiling, Math.min(ceiling, proportional + integral));
     }
 
     let missing = 0;
     let pos = this.readPos;
+    const step = this.rate * this.ratio;
     for (let i = 0; i < frames; i++) {
       // Cubic needs one sample either side of the pair it interpolates.
       const inWindow = pos - 1 >= this.from && pos + 2 < this.upTo;
@@ -252,9 +294,14 @@ class LiveProcessor extends AudioWorkletProcessor {
         out[c][i] = inWindow ? this.sample(ch, pos) : 0;
       }
       if (!inWindow) missing++;
-      pos += this.rate;
+      pos += step;
     }
     this.readPos = pos;
+    // The number that predicts crackle: the LEAST audio between the read
+    // head and the freshest write. A mean hides the dips; the min is what
+    // the source's delay budget must keep healthy.
+    const nowAhead = this.upTo - this.readPos;
+    if (nowAhead < this.minAhead) this.minAhead = nowAhead;
 
     this.underruns += missing;
     this.played += frames - missing;
@@ -267,10 +314,12 @@ class LiveProcessor extends AudioWorkletProcessor {
         underruns: this.underruns,
         played: this.played,
         ahead: ahead > 0 ? ahead : 0,
+        minAhead: Number.isFinite(this.minAhead) ? Math.max(0, this.minAhead) : null,
         errFrames: this.errFrames,
         rate: this.rate,
         resyncs: this.resyncs,
       });
+      this.minAhead = Infinity;
     }
     return true;
   }

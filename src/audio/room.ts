@@ -95,6 +95,16 @@ export class RoomConnection {
         this.ctx = new Ctor({ latencyHint: "interactive" });
       }
       await unlockAudio(this.ctx);
+      // Coming back from a suspension, the clock estimate is wrong by however
+      // long the page's clocks were frozen -- and confirming that over the
+      // 2-second keepalive takes ~8 s of playing at the wrong position. A
+      // fresh burst steps the offset within one round trip instead.
+      this.ctx.onstatechange = () => {
+        if (this.ctx?.state === "running" && this.connected) {
+          this.clock.reset();
+          this.clock.start();
+        }
+      };
       this.engine = new PlaybackEngine(this.ctx, this.clock);
       this.engine.subscribe(() => this.emit());
       this.live = new LivePlayer(
@@ -116,6 +126,12 @@ export class RoomConnection {
         void this.wake();
         // A socket dropped while backgrounded will not have retried yet.
         if (!this.connected && !this.closedByUs) this.open();
+        // iOS freezes performance.now() while hidden, so the clock offset is
+        // wrong by the whole absence. Re-measure now, not over the next 8 s.
+        else if (this.connected) {
+          this.clock.reset();
+          this.clock.start();
+        }
       });
     }
   }
@@ -242,6 +258,9 @@ export class RoomConnection {
 
       case "play":
         if (!this.engine) return;
+        // Claimed before the await so a state broadcast racing this handler
+        // cannot double-schedule -- and RELEASED on failure, so a later state
+        // message retries instead of leaving the device silent all track.
         this.scheduledSeq = msg.seq;
         if (!this.engine.has(msg.trackId)) {
           // Should not happen -- the barrier waits for `ready` -- but if it
@@ -250,6 +269,8 @@ export class RoomConnection {
         }
         if (this.engine.has(msg.trackId)) {
           this.engine.schedule(msg.trackId, msg.startAt, msg.offsetInTrack);
+        } else {
+          this.scheduledSeq = -1;
         }
         return;
 
@@ -318,6 +339,9 @@ export class RoomConnection {
         await engine.load(track.id, `/audio/${track.id}`);
         engine.schedule(track.id, st.startAt, st.offsetInTrack);
       } catch (err) {
+        // Release the claim: the next state broadcast retries the load
+        // instead of the device staying silent for the rest of the track.
+        this.scheduledSeq = -1;
         this.error = err instanceof Error ? err.message : "could not load track";
         this.emit();
       }
@@ -420,6 +444,8 @@ export class RoomConnection {
         ? Math.round(this.live.playoutMs * 10) / 10
         : null,
       marginMs: settled ? Math.round(live.marginMs) : null,
+      cushionMs:
+        settled && live.cushionMs !== null ? Math.round(live.cushionMs) : null,
       underruns: settled ? live.underruns : null,
     });
   }
