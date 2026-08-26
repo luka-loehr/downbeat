@@ -436,11 +436,11 @@ async fn run_stream(
             }
         });
 
-        loop {
+        'session: loop {
             tokio::select! {
                 // Outgoing clock pings.
                 Some(text) = ping_rx.recv() => {
-                    if write.send(Message::Text(text)).await.is_err() { break; }
+                    if write.send(Message::Text(text)).await.is_err() { break 'session; }
                 }
                 // Incoming control (pongs, state) from the room.
                 msg = read.next() => {
@@ -459,8 +459,8 @@ async fn run_stream(
                                 }
                             }
                         }
-                        Some(Ok(Message::Close(_))) | None => break,
-                        Some(Err(e)) => { tracing::warn!(?e, "ws read"); break; }
+                        Some(Ok(Message::Close(_))) | None => break 'session,
+                        Some(Err(e)) => { tracing::warn!(?e, "ws read"); break 'session; }
                         _ => {}
                     }
                 }
@@ -512,7 +512,10 @@ async fn run_stream(
                         wire.extend_from_slice(&play_at.to_le_bytes());
                         wire.extend_from_slice(&(emitted as f64).to_le_bytes());
                         wire.extend_from_slice(&opus_out[..n]);
-                        if write.send(Message::Binary(wire)).await.is_err() { break; }
+                        // A dead socket ends the SESSION, not just this batch —
+                        // an unlabeled break here would only stop peeling and
+                        // leave the select loop spinning against a broken pipe.
+                        if write.send(Message::Binary(wire)).await.is_err() { break 'session; }
 
                         emitted += OPUS_FRAME as i64;
                         status.packets.fetch_add(1, Ordering::Relaxed);
