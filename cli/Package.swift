@@ -5,10 +5,10 @@ let package = Package(
     name: "downbeat",
     platforms: [.macOS(.v15)],
     targets: [
-        // The terminal UI is a separate Node/Ink process that spawns this one;
-        // `downbeat` itself is the front end, this is the engine behind it.
+        // One native binary: capture, Opus, transport, local playback and the
+        // terminal dashboard. No runtime, no helper processes.
         .executableTarget(
-            name: "downbeat-core",
+            name: "downbeat",
             path: "Sources/downbeat",
             swiftSettings: [.unsafeFlags(["-Ounchecked"], .when(configuration: .release))]
         )

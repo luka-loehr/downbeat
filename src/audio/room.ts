@@ -313,6 +313,13 @@ export class RoomConnection {
     const track = st.queue[st.current];
     if (!track) return;
 
+    // Decoded PCM for anything but the current and next track is dead
+    // weight measured in hundreds of megabytes; drop it now.
+    const keep = [track.id];
+    const next = st.queue[st.current + 1];
+    if (next) keep.push(next.id);
+    engine.retain(keep);
+
     if (st.mode === "arming") {
       if (this.armedSeq === st.seq) return;
       this.armedSeq = st.seq;

@@ -1,10 +1,5 @@
 #!/bin/sh
-# Build and install Downbeat.
-#
-# Two binaries, one command. The capture engine must be native (Core Audio
-# process taps are macOS APIs) and the UI is React Ink, which must be Node, so
-# `downbeat` is a launcher that finds and spawns `downbeat-core`. Users only
-# ever type `downbeat`.
+# Build and install Downbeat: one native Swift binary, nothing else.
 set -e
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -14,24 +9,15 @@ mkdir -p "$PREFIX"
 echo "Repository : $REPO"
 echo "Target     : $PREFIX"
 
-echo "-> building the capture engine (Swift)"
+echo "-> building downbeat (Swift)"
 ( cd "$REPO/cli" && swift build -c release )
-install -m 755 "$REPO/cli/.build/release/downbeat-core" "$PREFIX/downbeat-core"
+install -m 755 "$REPO/cli/.build/release/downbeat" "$PREFIX/downbeat"
 
-echo "-> building the terminal UI (Ink)"
-( cd "$REPO/tui" && npm ci --silent --no-audit --no-fund 2>/dev/null || npm install --silent --no-audit --no-fund )
-( cd "$REPO/tui" && npm run --silent build )
-
-cat > "$PREFIX/downbeat" <<LAUNCHER
-#!/bin/sh
-# Downbeat — installed by scripts/install.sh
-exec node "$REPO/tui/dist/cli.js" "\$@"
-LAUNCHER
-chmod 755 "$PREFIX/downbeat"
+# The pre-0.4 split install: a Node launcher plus a separate engine.
+rm -f "$PREFIX/downbeat-core"
 
 echo
 echo "Installed:"
 echo "  $PREFIX/downbeat"
-echo "  $PREFIX/downbeat-core"
 echo
 echo "Next:  downbeat login   then   downbeat host"

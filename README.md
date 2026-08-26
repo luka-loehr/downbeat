@@ -1,7 +1,7 @@
 ![Downbeat banner](docs/assets/banner.svg)
 
 [![Worker](https://img.shields.io/badge/Cloudflare-Workers%20%2B%20Durable%20Objects-F38020?style=flat&logo=cloudflare&logoColor=white)](https://developers.cloudflare.com/durable-objects/)
-[![CLI](https://img.shields.io/badge/CLI-Swift%206%20%2F%20macOS%2014.4%2B-F05138?style=flat&logo=swift&logoColor=white)](cli/)
+[![CLI](https://img.shields.io/badge/CLI-Swift%206%20%C2%B7%20one%20native%20binary-F05138?style=flat&logo=swift&logoColor=white)](cli/)
 [![Codec](https://img.shields.io/badge/audio-Opus%2020%20ms%20%C2%B7%2048%20kHz-3ef2a0?style=flat)](#5-how-the-synchronisation-works)
 [![Drift](https://img.shields.io/badge/steady--state%20drift-0.00%20ms-3ef2a0?style=flat)](#5-how-the-synchronisation-works)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat)](LICENSE)
@@ -20,7 +20,7 @@ has nothing left to affect.
 
 ```bash
 git clone https://github.com/luka-loehr/downbeat && cd downbeat
-./scripts/install.sh          # builds the Swift engine and the terminal UI
+./scripts/install.sh          # builds the one native binary Downbeat is
 downbeat login                # once, against your own deployment
 downbeat host                 # prints a QR code
 ```
@@ -70,6 +70,14 @@ Karlsruhe (Cloudflare VIE edge), 2026-08-23.
 - **Live capture from a Mac** via a Core Audio process tap: Spotify (or any
   app) is captured *and muted at the real output* in one step, so the host
   hears it back through Downbeat in step with every phone.
+- **One native binary on the host.** Capture, Opus, transport, local playback
+  and the terminal dashboard are a single Swift executable — no Node runtime,
+  no helper processes, a few tens of megabytes and a few percent of one core.
+- **Shared memory to the speaker.** In the browser, decoded audio is written
+  straight into a SharedArrayBuffer ring the AudioWorklet reads on the
+  realtime thread: zero copies, zero message ports, and main-thread jank
+  cannot touch playback. An adaptive delay budget then trims itself to the
+  smallest value the room's weakest listener can actually carry.
 - **Sessions are real server state.** A signed token cannot be revoked and
   cannot stop two hosts claiming one room, so ownership lives in D1 with
   explicit takeover, and an hourly cron sweeps expired sessions and orphaned
@@ -101,8 +109,8 @@ Karlsruhe (Cloudflare VIE edge), 2026-08-23.
                  │
     ┌────────────┼────────────┐
     ▼            ▼            ▼
-  iPhone       iPad         Mac        AudioWorklet ring,
-                                       indexed by output frame
+  iPhone       iPad         Mac        shared-memory ring,
+                                       indexed by stream sample
 ```
 
 | path | contents |
@@ -112,8 +120,8 @@ Karlsruhe (Cloudflare VIE edge), 2026-08-23.
 | `src/audio/clock.ts` | Room clock — Cristian's algorithm, min-RTT filtering, slew |
 | `src/audio/engine.ts` | Decode-ahead playback, drift control, live player |
 | `src/audio/room.ts` | Connection, reconnect, state reconciliation |
-| `public/live-processor.js` | AudioWorklet ring buffer for live playback |
-| `cli/Sources/downbeat/` | macOS CLI: tap, Opus, transport, local playback, QR |
+| `public/live-processor.js` | AudioWorklet reading the shared-memory ring |
+| `cli/Sources/downbeat/` | the host binary: tap, Opus, transport, local playback, dashboard, QR |
 | `migrations/` | D1 schema |
 
 ## 4. Quickstart
@@ -126,11 +134,10 @@ browsers refuse to start audio without a user gesture.
 ### Hosting from a Mac
 
 ```bash
-cd cli && swift build -c release
-cp .build/release/downbeat ~/.local/bin/
+./scripts/install.sh      # or: cd cli && swift build -c release
 
-downbeat login            # passphrase once, stored in the Keychain
-downbeat host             # taps Spotify, prints a QR, starts the room
+downbeat login            # passphrase once
+downbeat host             # taps Spotify, draws the dashboard, opens the room
 ```
 
 While hosting, the terminal is live: `m` mutes this Mac without touching
@@ -179,8 +186,11 @@ Two things make this work on Cloudflare specifically:
 that sample reaches the output, so it already carries the hardware latency.
 The mapping collapses to one scalar, `ctx = room/1000 + k`.
 
-**Live playback** writes decoded audio into an AudioWorklet ring **indexed by
-absolute output frame**. The alternative — scheduling each 20 ms packet as its
+**Live playback** writes decoded audio into a **SharedArrayBuffer ring
+indexed by absolute stream sample**, read directly by the AudioWorklet on the
+realtime audio thread — no copies, no message ports, so a janky main thread
+cannot stutter playback (the pages are served cross-origin isolated to make
+that legal). The alternative — scheduling each 20 ms packet as its
 own source node — puts that mapping in the signal path fifty times a second,
 and every scrap of its jitter becomes a gap between two packets. That is
 audible as a stutter, and it is exactly the bug this design removes: here the
@@ -232,8 +242,9 @@ DOWNBEAT_URL=https://your-worker.example.com downbeat login
 downbeat host
 ```
 
-Requires **Workers Paid** for Durable Objects, and macOS 14.4+ on the host for
-Core Audio process taps. Listeners need nothing but a browser.
+Requires **Workers Paid** for Durable Objects, and macOS 15+ on the host.
+Listeners need nothing but a modern browser (the pages are served
+cross-origin isolated for shared-memory audio).
 
 ### Working on it
 
@@ -242,8 +253,8 @@ npm run typecheck        # worker + web
 npm test                 # clock estimator, drift controller, room codes
 npm run build
 cd cli && swift build -c release
-./.build/release/downbeat-core selftest       # Opus encoder against live capture
-./.build/release/downbeat-core selftest-qr    # renders a QR and decodes it back
+./.build/release/downbeat selftest      # Opus encoder against live capture
+./.build/release/downbeat selftest-qr   # renders a QR and decodes it back
 ```
 
 `selftest-qr` is not cosmetic: printing something that *looks* like a QR code

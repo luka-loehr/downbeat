@@ -3,6 +3,38 @@
 All notable changes to this project, with the conditions under which each
 measurement was taken.
 
+## [0.4.0] — 2026-08-26
+
+Fully native. One Swift binary on the Mac; shared memory to the speaker in
+the browser. A hard cutover: nothing of the old two-process design remains.
+
+### Changed
+- **The Node/Ink terminal UI is gone.** Capture, Opus, transport, local
+  playback and the dashboard are now a single Swift executable — no Node
+  runtime, no launcher script, no JSON pipe between processes. The old UI
+  process was measured at 860 MB and 18 % CPU against the engine's 44 MB and
+  2.4 %; the native dashboard draws whole frames at 5 Hz for roughly nothing.
+  Same keys (`q`, `m`, `+`/`-`, `s` with the picker), same QR, same
+  monochrome look, plus live buffer/cushion/timeline telemetry.
+- **Browser playback reads shared memory.** Decoded audio is written straight
+  into a SharedArrayBuffer ring the AudioWorklet reads on the realtime
+  thread; sync targets, writer progress and stats travel through seqlock
+  blocks in a shared control buffer. Zero copies, zero message ports, and a
+  janky main thread can no longer touch the signal path — hole-zeroing moved
+  off the render thread entirely. Pages are served cross-origin isolated
+  (COOP/COEP) to make shared memory legal; every current Safari, Chrome and
+  Firefox qualifies.
+- The capture path's peak scan and clamp are vDSP (Accelerate): vectorised,
+  allocation-free, realtime-safe.
+- `install.sh` and the release package ship exactly one file.
+
+### Fixed
+- Decoded tracks are evicted once they are neither current nor next — decoded
+  PCM is ~115 MB per five-minute song, and a long file-mode queue previously
+  accumulated all of it on every phone, forever.
+- The WASM Opus decoder (Firefox path) frees its linear memory on stop
+  instead of leaking it until the tab dies.
+
 ## [0.3.1] — 2026-08-26
 
 The crackle, the warble, and the minute of being out of sync — all three

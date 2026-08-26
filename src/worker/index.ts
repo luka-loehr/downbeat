@@ -70,7 +70,17 @@ export default {
       return json({ error: message }, 500);
     }
 
-    return env.ASSETS.fetch(request);
+    // Cross-origin isolation, so pages can use SharedArrayBuffer: live audio
+    // is handed to the output thread through shared memory, not messages.
+    const asset = await env.ASSETS.fetch(request);
+    const headers = new Headers(asset.headers);
+    headers.set("Cross-Origin-Opener-Policy", "same-origin");
+    headers.set("Cross-Origin-Embedder-Policy", "require-corp");
+    return new Response(asset.body, {
+      status: asset.status,
+      statusText: asset.statusText,
+      headers,
+    });
   },
   /**
    * Hourly sweep. Sessions and their audio are not meant to outlive the party

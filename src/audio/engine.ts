@@ -199,6 +199,20 @@ export class PlaybackEngine {
     return this.buffers.get(trackId)?.duration ?? 0;
   }
 
+  /**
+   * Drop decoded audio for everything not in `ids`. Decoded PCM is enormous
+   * — a five-minute track is ~115 MB — and a long queue would otherwise
+   * accumulate gigabytes on every phone. The currently playing track is
+   * always kept, whatever the list says.
+   */
+  retain(ids: Iterable<string>): void {
+    const keep = new Set(ids);
+    if (this.trackId) keep.add(this.trackId);
+    for (const id of [...this.buffers.keys()]) {
+      if (!keep.has(id)) this.buffers.delete(id);
+    }
+  }
+
   /* ------------------------------------------------------------------ transport */
 
   /**
@@ -437,6 +451,20 @@ export class PlaybackEngine {
 /* ==================================================================== live */
 
 /**
+ * Shared-memory contract with the worklet; layout mirrored in
+ * public/live-processor.js — keep the two in step.
+ */
+const RING_FRAMES = 1 << 19; // ~10.9 s at 48 kHz
+const RING_MASK = RING_FRAMES - 1;
+const SEQ_SYNC = 0;
+const SEQ_WRITE = 1;
+const SEQ_STATS = 2;
+const CTL_JUMP = 3;
+const CTL_ACK = 4;
+const F64_BASE = 64;
+const STATS_POLL_MS = 250;
+
+/**
  * Live playback: a continuous stream from a Downbeat CLI instead of a file.
  *
  * Each packet arrives already carrying the instant it must be heard, computed
@@ -570,6 +598,8 @@ class OpusSource {
       /* already closed */
     }
     this.webcodec = null;
+    // The WASM decoder owns linear memory the GC cannot see; free it.
+    (this.wasm as { free?: () => void } | null)?.free?.();
     this.wasm = null;
   }
 }
@@ -579,6 +609,16 @@ export class LivePlayer {
   private node: AudioWorkletNode | null = null;
   private config: LiveConfig | null = null;
   private moduleLoaded = false;
+
+  /** The shared control block and audio ring; see the layout constants. */
+  private ctl: Int32Array | null = null;
+  private f64: Float64Array | null = null;
+  private rings: Float32Array[] = [];
+  /** Writer's view of the ring: highest sample written, oldest still valid. */
+  private upTo = -1;
+  private ringFrom = 0;
+  private statsTimer: ReturnType<typeof setInterval> | null = null;
+  private lastPublish = 0;
 
   /**
    * The room<->context mapping collapses to one scalar: ctx = room/1000 + k.
@@ -694,6 +734,16 @@ export class LivePlayer {
     this.requestJump = false;
     this.reseedMargin = false;
 
+    // Live audio travels to the output thread through shared memory: zero
+    // copies, zero message ports, immune to main-thread jank. This needs
+    // cross-origin isolation, which our own Worker serves on every page —
+    // a browser without it is an embedded webview, not ours to fix.
+    if (typeof SharedArrayBuffer === "undefined" || !globalThis.crossOriginIsolated) {
+      throw new Error(
+        "this browser blocks shared audio memory — open the room in Safari or Chrome",
+      );
+    }
+
     if (!this.moduleLoaded) {
       // Fingerprinted so a cached copy from an earlier deploy can never be
       // used against newer application code.
@@ -701,40 +751,34 @@ export class LivePlayer {
       this.moduleLoaded = true;
     }
 
+    const control = new SharedArrayBuffer(256);
+    const audio = new SharedArrayBuffer(config.channels * RING_FRAMES * 4);
+    this.ctl = new Int32Array(control);
+    this.f64 = new Float64Array(control, F64_BASE);
+    this.rings = [];
+    for (let c = 0; c < config.channels; c++) {
+      this.rings.push(new Float32Array(audio, c * RING_FRAMES * 4, RING_FRAMES));
+    }
+    this.upTo = -1;
+    this.ringFrom = 0;
+    this.lastPublish = 0;
+
     const node = new AudioWorkletNode(this.ctx, "downbeat-live", {
       numberOfInputs: 0,
       numberOfOutputs: 1,
       outputChannelCount: [config.channels],
       // The worklet counts positions in STREAM samples so a context that
       // refused 48 kHz still places and consumes audio correctly.
-      processorOptions: { channels: config.channels, streamRate: config.sampleRate },
+      processorOptions: {
+        channels: config.channels,
+        streamRate: config.sampleRate,
+        control,
+        audio,
+      },
     });
-    node.port.onmessage = (event) => {
-      const data = event.data as {
-        type: string;
-        underruns: number;
-        ahead: number;
-        minAhead: number | null;
-        errFrames: number;
-        rate: number;
-        resyncs: number;
-      };
-      if (data.type !== "stats") return;
-      const streamRate = config.sampleRate;
-      this.stats.underruns = data.underruns;
-      this.stats.aheadMs = (data.ahead / streamRate) * 1000;
-      if (data.minAhead !== null && data.minAhead !== undefined) {
-        this.aheadWindow.push(data.minAhead);
-        // ~2 s of 100 ms reports: long enough to catch a jitter burst,
-        // short enough that recovery is visible within a telemetry cycle.
-        if (this.aheadWindow.length > 20) this.aheadWindow.shift();
-      }
-      this.anchorErrorMs = (data.errFrames / streamRate) * 1000;
-      this.appliedRate = data.rate;
-      this.resyncs = data.resyncs;
-    };
     node.connect(this.out);
     this.node = node;
+    this.statsTimer = setInterval(() => this.pollStats(), STATS_POLL_MS);
 
     this.source = await OpusSource.create(
       config,
@@ -749,12 +793,63 @@ export class LivePlayer {
   stop(): void {
     this.source?.close();
     this.source = null;
-    if (this.node) {
-      this.node.port.onmessage = null;
-      this.node.disconnect();
-    }
+    if (this.statsTimer !== null) clearInterval(this.statsTimer);
+    this.statsTimer = null;
+    this.node?.disconnect();
     this.node = null;
+    this.ctl = null;
+    this.f64 = null;
+    this.rings = [];
     this.config = null;
+  }
+
+  /** Seqlock-write two Float64 slots; single writer per block by design. */
+  private writePair(seqIndex: number, slot: number, a: number, b: number): void {
+    const ctl = this.ctl;
+    const f64 = this.f64;
+    if (!ctl || !f64) return;
+    Atomics.add(ctl, seqIndex, 1);
+    f64[slot] = a;
+    f64[slot + 1] = b;
+    Atomics.add(ctl, seqIndex, 1);
+  }
+
+  /** Read the worklet's stats block; runs on a timer, off the audio thread. */
+  private pollStats(): void {
+    const ctl = this.ctl;
+    const f64 = this.f64;
+    const config = this.config;
+    if (!ctl || !f64 || !config) return;
+    for (let tries = 0; tries < 3; tries++) {
+      const s1 = Atomics.load(ctl, SEQ_STATS);
+      if (s1 & 1) continue;
+      const underruns = f64[4];
+      const minAhead = f64[5];
+      const errFrames = f64[6];
+      const rate = f64[7];
+      const resyncs = f64[8];
+      const publish = f64[9];
+      if (Atomics.load(ctl, SEQ_STATS) !== s1) continue;
+
+      const streamRate = config.sampleRate;
+      this.stats.underruns = underruns;
+      this.anchorErrorMs = (errFrames / streamRate) * 1000;
+      this.appliedRate = rate;
+      this.resyncs = resyncs;
+      if (publish !== this.lastPublish) {
+        this.lastPublish = publish;
+        if (minAhead >= 0) {
+          this.aheadWindow.push(minAhead);
+          // ~2 s of window: long enough to catch a jitter burst, short
+          // enough that recovery is visible within a telemetry cycle.
+          if (this.aheadWindow.length > 8) this.aheadWindow.shift();
+          this.stats.aheadMs = (minAhead / streamRate) * 1000;
+        }
+        // Tell the worklet its dip window was consumed; it starts a new one.
+        Atomics.add(ctl, CTL_ACK, 1);
+      }
+      return;
+    }
   }
 
   /** Feed one wire frame: play instant, sample index, then the Opus packet. */
@@ -836,8 +931,15 @@ export class LivePlayer {
     // there every render quantum; nothing here ever moves audio, so the
     // placement of packets stays exactly contiguous.
     this.postSyncPoint();
-    if (this.requestJump && this.node) {
-      this.node.port.postMessage({ type: "jump" });
+    if (this.requestJump && this.ctl) {
+      // The offset mapping changed, so the ring's recorded extent describes
+      // samples placed under the OLD mapping — stale audio the read head
+      // must not be allowed to touch. Restart the window cleanly, then have
+      // the worklet snap once.
+      this.upTo = -1;
+      this.ringFrom = 0;
+      this.writePair(SEQ_WRITE, 2, -1, 0);
+      Atomics.add(this.ctl, CTL_JUMP, 1);
       this.requestJump = false;
     }
 
@@ -852,8 +954,7 @@ export class LivePlayer {
    * other, rather than merely each being internally smooth.
    */
   private postSyncPoint(): void {
-    const node = this.node;
-    if (!node || !this.anchored || !this.config) return;
+    if (!this.ctl || !this.anchored || !this.config) return;
     // Ring positions are stream samples; the frame stamp is output frames.
     // Mixing the two rates -- on a context that refused 48 kHz -- tears the
     // target away from the data at their difference, thousands of frames a
@@ -870,11 +971,12 @@ export class LivePlayer {
       this.anchorSample +
       ((heardNowMs - this.anchorPlayAt - this.timelineDriftMs) / 1000) * streamRate;
 
-    node.port.postMessage({
-      type: "sync",
-      frame: Math.round(now * this.ctx.sampleRate),
-      ring: wantedSample + this.frameOffset,
-    });
+    this.writePair(
+      SEQ_SYNC,
+      0,
+      Math.round(now * this.ctx.sampleRate),
+      wantedSample + this.frameOffset,
+    );
   }
 
   /** Keep `k` tracking the real relationship between the two clocks. */
@@ -924,15 +1026,55 @@ export class LivePlayer {
   }
 
   private render(planes: Float32Array[], sampleIndex: number): void {
-    const node = this.node;
-    if (!node || !planes.length) return;
-
+    if (!this.rings.length || !planes.length) return;
     // Contiguous by construction: consecutive packets differ by exactly their
-    // own length, so no rounding can open a hole between them.
-    node.port.postMessage(
-      { type: "audio", startFrame: sampleIndex + this.frameOffset, planes },
-      planes.map((p) => p.buffer),
-    );
+    // own length, so no rounding can open a hole between them. Written
+    // straight into shared memory — no copy, no port, no clone.
+    const startFrame = sampleIndex + this.frameOffset;
+    const frames = planes[0].length;
+
+    // A hole means packets were lost or arrived too late. Zero it — on this
+    // thread, never the render thread — rather than leaving whatever the
+    // ring held a rotation ago.
+    if (this.upTo >= 0 && startFrame > this.upTo) {
+      this.zeroRing(this.upTo, Math.min(startFrame, this.upTo + RING_FRAMES));
+    }
+
+    for (let c = 0; c < this.rings.length; c++) {
+      const src = planes[Math.min(c, planes.length - 1)];
+      const ring = this.rings[c];
+      let offset = startFrame & RING_MASK;
+      let i = 0;
+      let remaining = frames;
+      while (remaining > 0) {
+        const chunk = Math.min(remaining, RING_FRAMES - offset);
+        ring.set(src.subarray(i, i + chunk), offset);
+        i += chunk;
+        offset = (offset + chunk) & RING_MASK;
+        remaining -= chunk;
+      }
+    }
+
+    if (this.upTo < 0) this.ringFrom = startFrame;
+    if (startFrame + frames > this.upTo) this.upTo = startFrame + frames;
+    // Never claim more history than the ring physically holds.
+    this.ringFrom = Math.max(this.ringFrom, this.upTo - RING_FRAMES);
+    this.writePair(SEQ_WRITE, 2, this.upTo, this.ringFrom);
     this.stats.decoded++;
+  }
+
+  private zeroRing(fromFrame: number, toFrame: number): void {
+    if (toFrame - fromFrame >= RING_FRAMES) {
+      for (const ring of this.rings) ring.fill(0);
+      return;
+    }
+    let offset = fromFrame & RING_MASK;
+    let remaining = toFrame - fromFrame;
+    while (remaining > 0) {
+      const chunk = Math.min(remaining, RING_FRAMES - offset);
+      for (const ring of this.rings) ring.fill(0, offset, offset + chunk);
+      offset = (offset + chunk) & RING_MASK;
+      remaining -= chunk;
+    }
   }
 }

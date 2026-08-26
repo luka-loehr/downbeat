@@ -58,8 +58,7 @@ final class Transport: NSObject, @unchecked Sendable {
     struct MemberSnapshot: Sendable {
         let count: Int
         let spreadMs: Double
-        /// The member array, already encoded, so no dictionary crosses threads.
-        let json: String
+        let members: [MemberInfo]
     }
     var onMembers: (@Sendable (MemberSnapshot) -> Void)?
 
@@ -307,9 +306,16 @@ final class Transport: NSObject, @unchecked Sendable {
             totalListenerUnderruns = speakers
                 .compactMap { $0["underruns"] as? Double }
                 .reduce(0) { $0 + Int($1) }
-            let encoded = (try? JSONSerialization.data(withJSONObject: speakers))
-                .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
-            onMembers?(MemberSnapshot(count: speakers.count, spreadMs: spread, json: encoded))
+            let infos = speakers.map { m in
+                MemberInfo(
+                    name: m["name"] as? String ?? "Speaker",
+                    role: m["role"] as? String ?? "listener",
+                    rtt: m["rtt"] as? Double ?? 0,
+                    sync: m["sync"] as? Double ?? 0,
+                    cushionMs: m["cushionMs"] as? Double,
+                    playoutMs: m["playoutMs"] as? Double)
+            }
+            onMembers?(MemberSnapshot(count: speakers.count, spreadMs: spread, members: infos))
         }
     }
 
