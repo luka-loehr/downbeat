@@ -117,9 +117,7 @@ is one person's: your Cloudflare account, your Spotify account, your rooms.
   ($5/month — Containers require it; see [§5](#5-what-it-costs) for what the
   free plan can and cannot do).
 - A **Spotify Premium** account (Spotify Connect refuses to play on free
-  accounts).
-- A **Spotify app** of your own: [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard)
-  → *Create app* → any name → check the **Web API** box. Two minutes.
+  accounts). No developer app, no API keys — none of that exists here.
 - Node 20+, Docker running (the audio source deploys as a container image).
 
 **Then:**
@@ -130,21 +128,17 @@ git clone https://github.com/luka-loehr/downbeat && cd downbeat
 ```
 
 The script creates the bucket and database on your account, wires the ids,
-prompts for the four secrets, and deploys. When it finishes, do the two
-manual steps it prints:
-
-1. In your Spotify app's settings, add the **Redirect URI**
-   `https://<your-worker-domain>/api/spotify/callback` (the exact domain the
-   deploy printed — `<name>.<account>.workers.dev`, or your own custom
-   domain if you point `routes` in `wrangler.jsonc` at one).
-2. Open `https://<your-worker-domain>/host` and connect Spotify.
+prompts for the two secrets, and deploys. Then open
+`https://<your-worker-domain>/host`, unlock, and **connect Spotify**: approve
+in the tab that opens, and paste back the address of the dead `127.0.0.1`
+page Spotify strands you on — that address carries the authorization code,
+and the console finishes the exchange server-side. Once, ever.
 
 Every later deploy is just `npx wrangler deploy`. Pushing to `main` deploys
 automatically if you add `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`
 to your GitHub repository's Actions secrets.
 
-> The secrets, for reference: `HOST_PASSPHRASE` (unlocks your console),
-> `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` (from the dashboard), and
+> The secrets, for reference: `HOST_PASSPHRASE` (unlocks your console) and
 > `TOKEN_KEY` (32 random bytes, base64 — encrypts the stored Spotify refresh
 > token so a leaked database hands out nothing usable).
 
@@ -174,12 +168,15 @@ nothing idles on your bill.
   can connect a Spotify account — this is not, and is deliberately not
   built to be, a multi-tenant service where strangers log in. You stream
   your own account, on your own deployment, to your own party.
-- The Spotify **client secret never leaves the Worker**. The container
-  receives only hour-lived access tokens, fetched on demand; the refresh
-  token is stored AES-GCM-encrypted under a key that exists only as a Worker
-  secret.
-- OAuth is Authorization Code + PKCE, the state/verifier held server-side,
-  each state consumable exactly once.
+- **There is no client secret anywhere.** Spotify auth is Authorization
+  Code + PKCE as a public client — the same flow librespot itself uses,
+  against the same client id, because Spotify Connect's login5 endpoint
+  accepts no other (Web-API developer-app tokens are refused outright; we
+  measured). The refresh token is stored AES-GCM-encrypted under a key that
+  exists only as a Worker secret; the container receives only hour-lived
+  access tokens, fetched on demand.
+- The PKCE state/verifier are held server-side, each state consumable
+  exactly once.
 - Host and source roles are granted only against an HMAC-signed token that
   is *also* checked against the session on record — a signature alone cannot
   be revoked, so the database is the authority.
@@ -232,10 +229,11 @@ and slewing every adjustment so no packet ever jumps.
 
 ## 8. What this deliberately does not do
 
-- **No Web Playback SDK, no API streaming.** Spotify's Web API caps new apps
-  at five users in dev mode — irrelevant here, because exactly one user (you)
-  ever authorizes, for control and login only. The audio path is Spotify
-  Connect via librespot, under your own Premium account.
+- **No Web Playback SDK, no developer app, no API streaming.** Spotify's
+  Web API brings quota caps and app reviews for a flow that, in the end,
+  cannot even drive a Connect device (login5 refuses its tokens). The audio
+  path is Spotify Connect via librespot, authorized the way librespot
+  authorizes, under your own Premium account.
 - **No multi-tenant hosting.** One deployment, one operator, one Spotify
   account. Anything else is a different product with different legal weather.
 - **No WebRTC.** It minimises latency and tolerates drift, resampling

@@ -14,10 +14,9 @@ import { useObserver } from "../lib/useObserver";
 
 interface SpotifyState {
   connected: boolean;
-  /** False while the deployment's Spotify secrets are not set yet. */
+  /** False while the deployment's TOKEN_KEY secret is not set yet. */
   configured?: boolean;
-  displayName?: string | null;
-  product?: string | null;
+  connectedAt?: number;
 }
 
 interface SourceState {
@@ -49,28 +48,11 @@ async function api<T>(path: string, body: unknown): Promise<T> {
   return data;
 }
 
-/** What the Spotify OAuth callback appended to the URL, consumed once. */
-function takeCallbackNote(): string | null {
-  const flag = new URLSearchParams(location.search).get("spotify");
-  if (!flag) return null;
-  history.replaceState(null, "", "/host");
-  const notes: Record<string, string> = {
-    connected: "Spotify connected.",
-    free: "Connected — but this account is not Premium, and Spotify Connect needs Premium to play.",
-    denied: "Spotify said no — the login was cancelled.",
-    expired: "That login attempt expired. Try again.",
-    scope: "Spotify granted no streaming permission. Check the app settings and reconnect.",
-    error: "Spotify login failed. Try again.",
-  };
-  return notes[flag] ?? null;
-}
-
 export function Host() {
   const [pass, setPass] = useState<string | null>(() => sessionStorage.getItem(PASS_KEY));
-  const [note, setNote] = useState<string | null>(takeCallbackNote);
 
   if (!pass) return <Gate onUnlocked={setPass} />;
-  return <Console pass={pass} note={note} clearNote={() => setNote(null)} />;
+  return <Console pass={pass} />;
 }
 
 /* --------------------------------------------------------------------- gate */
@@ -140,16 +122,10 @@ function Gate({ onUnlocked }: { onUnlocked: (pass: string) => void }) {
 
 /* ------------------------------------------------------------------ console */
 
-function Console({
-  pass,
-  note,
-  clearNote,
-}: {
-  pass: string;
-  note: string | null;
-  clearNote: () => void;
-}) {
+function Console({ pass }: { pass: string }) {
   const [spotify, setSpotify] = useState<SpotifyState | null>(null);
+  // The paste leg of the Spotify connect flow; null = not mid-flow.
+  const [pasteUrl, setPasteUrl] = useState<string | null>(null);
   const [room, setRoom] = useState<HostRoom | null>(() => {
     try {
       return JSON.parse(sessionStorage.getItem(ROOM_KEY) ?? "null") as HostRoom | null;
@@ -179,7 +155,20 @@ function Console({
   async function connectSpotify() {
     try {
       const { url } = await api<{ url: string }>("/api/spotify/login", { passphrase: pass });
-      location.href = url;
+      // A new tab, so the console survives to receive the paste.
+      window.open(url, "_blank", "noopener");
+      setPasteUrl("");
+    } catch (err) {
+      fail(err);
+    }
+  }
+
+  async function completeSpotify() {
+    setError(null);
+    try {
+      await api("/api/spotify/complete", { passphrase: pass, redirectUrl: pasteUrl });
+      setPasteUrl(null);
+      await refreshSpotify();
     } catch (err) {
       fail(err);
     }
@@ -297,14 +286,6 @@ function Console({
         </div>
       </header>
 
-      {note && (
-        <button
-          onClick={clearNote}
-          className="mt-6 w-full rounded-lg border border-lock/40 bg-lock/10 px-4 py-3 text-left text-sm text-lock"
-        >
-          {note}
-        </button>
-      )}
       {error && (
         <button
           onClick={() => setError(null)}
@@ -321,27 +302,20 @@ function Console({
         ) : spotify.configured === false ? (
           <>
             <p className="text-sm leading-relaxed text-muted">
-              This deployment has no Spotify app yet. Create one at{" "}
-              <span className="num text-ink">developer.spotify.com/dashboard</span>, then set the
-              secrets:
+              This deployment is missing its token encryption key. Set it once:
             </p>
             <pre className="num mt-3 overflow-x-auto rounded-lg border border-line bg-panel px-4 py-3 text-[11px] leading-relaxed text-muted">
-              {"npx wrangler secret put SPOTIFY_CLIENT_ID\nnpx wrangler secret put SPOTIFY_CLIENT_SECRET\nopenssl rand -base64 32 | npx wrangler secret put TOKEN_KEY"}
+              {"openssl rand -base64 32 | npx wrangler secret put TOKEN_KEY"}
             </pre>
           </>
         ) : spotify.connected ? (
           <>
-            <Row label="Account" value={spotify.displayName ?? "connected"} good />
-            {spotify.product !== "premium" && (
-              <p className="mt-3 text-sm text-warn">
-                This account is not Premium — Spotify Connect cannot play on it.
-              </p>
-            )}
+            <Row label="Account" value="connected" good />
             <button onClick={disconnectSpotify} className="mt-4 text-[11px] uppercase tracking-[0.24em] text-dim transition-colors hover:text-muted">
               Disconnect
             </button>
           </>
-        ) : (
+        ) : pasteUrl === null ? (
           <>
             <p className="text-sm leading-relaxed text-muted">
               Connect the Spotify account this deployment plays from. Once — the
@@ -352,6 +326,36 @@ function Console({
               className="mt-4 w-full rounded-xl bg-[#1db954] px-6 py-3.5 text-sm font-bold uppercase tracking-[0.2em] text-void transition-opacity hover:opacity-90"
             >
               Connect Spotify
+            </button>
+          </>
+        ) : (
+          <>
+            <p className="text-sm leading-relaxed text-muted">
+              Approve in the tab that just opened. Spotify then strands you on a
+              dead <span className="num text-ink">127.0.0.1</span> page — that is
+              expected. Copy that page's address and paste it here:
+            </p>
+            <input
+              value={pasteUrl}
+              onChange={(e) => setPasteUrl(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && void completeSpotify()}
+              autoFocus
+              spellCheck={false}
+              placeholder="http://127.0.0.1:8898/login?code=…"
+              className="num mt-3 w-full rounded-xl border border-line bg-panel px-4 py-3 text-xs text-ink outline-none transition-colors placeholder:text-dim focus:border-pulse"
+            />
+            <button
+              onClick={completeSpotify}
+              disabled={!pasteUrl}
+              className="mt-3 w-full rounded-xl bg-[#1db954] px-6 py-3.5 text-sm font-bold uppercase tracking-[0.2em] text-void transition-opacity disabled:opacity-25 hover:opacity-90"
+            >
+              Finish connecting
+            </button>
+            <button
+              onClick={() => setPasteUrl(null)}
+              className="mt-3 w-full text-center text-[11px] uppercase tracking-[0.24em] text-dim transition-colors hover:text-muted"
+            >
+              Cancel
             </button>
           </>
         )}

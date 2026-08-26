@@ -3,8 +3,9 @@ import { SourceContainer } from "./source-container";
 import type { SourceEnv } from "./source-container";
 import {
   AUTH_TTL_MS,
+  SPOTIFY_CLIENT_ID,
   sourceToken,
-  spotifyCallback,
+  spotifyComplete,
   spotifyLogin,
   spotifyLogout,
   spotifyStatus,
@@ -73,8 +74,8 @@ export default {
       if (pathname === "/api/spotify/login" && request.method === "POST") {
         return await spotifyLogin(request, env);
       }
-      if (pathname === "/api/spotify/callback") {
-        return await spotifyCallback(request, env);
+      if (pathname === "/api/spotify/complete" && request.method === "POST") {
+        return await spotifyComplete(request, env);
       }
       if (pathname === "/api/spotify/status" && request.method === "POST") {
         return await spotifyStatus(request, env);
@@ -312,7 +313,9 @@ async function sourceStart(request: Request, env: Env): Promise<Response> {
     ROOM_CODE: code,
     HOST_TOKEN: body.hostToken!,
     WORKER_URL: new URL(request.url).origin,
-    SPOTIFY_CLIENT_ID: env.SPOTIFY_CLIENT_ID,
+    // The session must present the same client the tokens are minted for;
+    // login5 accepts no other pairing (see spotify.ts).
+    SPOTIFY_CLIENT_ID,
     DEVICE_NAME: (body.deviceName || "Downbeat").slice(0, 32),
     BUFFER_MS: String(bufferMs),
   };

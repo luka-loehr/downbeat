@@ -13,7 +13,12 @@ path = "src/main.rs"
 # library, not the binary: it registers as a Connect device under the user's
 # account and hands us decoded PCM through a custom Sink — no screen capture,
 # no virtual device, no TUI to scrape.
-librespot = { version = "0.6", default-features = false }
+#
+# Pinned to a dev commit rather than 0.6.0: released login5 hardcodes the
+# desktop client id on Linux, which rejects stored credentials that came from
+# a custom app's access token (our whole auth model). Dev presents the
+# session's own client id for StoredCredential logins — exactly our case.
+librespot = { git = "https://github.com/librespot-org/librespot", rev = "1599145bf2c98660d35b17817b3386767a7e4b42", default-features = false, features = ["rustls-tls-native-roots"] }
 
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.24", features = ["connect", "rustls-tls-native-roots"], default-features = false }
@@ -25,6 +30,10 @@ rubato = "0.15"
 opus = "0.3"
 
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+# The tree ends up containing BOTH rustls crypto providers (reqwest wants
+# ring, tungstenite's stack wants aws-lc-rs), and rustls 0.23 panics at the
+# first TLS handshake rather than guess. main() installs ring explicitly.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

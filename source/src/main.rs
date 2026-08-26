@@ -34,7 +34,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
-use librespot::connect::{config::ConnectConfig, spirc::Spirc};
+use librespot::connect::{ConnectConfig, Spirc};
 use librespot::core::{authentication::Credentials, Session, SessionConfig};
 use librespot::playback::audio_backend::{Sink, SinkResult};
 use librespot::playback::config::PlayerConfig;
@@ -164,6 +164,13 @@ impl Sink for ChannelSink {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Two rustls crypto providers exist in this dependency tree (ring via
+    // reqwest, aws-lc-rs via the websocket stack), and rustls panics on the
+    // first handshake rather than pick one. Choose ring, up front, always.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install rustls crypto provider");
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -260,7 +267,14 @@ async fn run_spotify(
 
         status.set_spotify("connecting");
         let session = Session::new(session_config.clone(), None);
-        let mixer = Arc::new(SoftMixer::open(MixerConfig::default()));
+        let mixer = match SoftMixer::open(MixerConfig::default()) {
+            Ok(m) => Arc::new(m),
+            Err(e) => {
+                tracing::error!(?e, "softmixer open failed");
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                continue;
+            }
+        };
         let tx = pcm_tx.clone();
         let player = Player::new(
             PlayerConfig::default(),

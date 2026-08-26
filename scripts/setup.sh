@@ -55,15 +55,10 @@ say "applying migrations"
 npx wrangler d1 migrations apply downbeat-sessions --remote
 
 echo ""
-echo "Four secrets. The first three you choose or copy from the Spotify"
-echo "developer dashboard; the last is generated for you."
+echo "Two secrets. One you choose, one is generated for you."
 echo ""
 say "HOST_PASSPHRASE — what unlocks your host console"
 npx wrangler secret put HOST_PASSPHRASE
-say "SPOTIFY_CLIENT_ID — from developer.spotify.com/dashboard"
-npx wrangler secret put SPOTIFY_CLIENT_ID
-say "SPOTIFY_CLIENT_SECRET — same page, 'View client secret'"
-npx wrangler secret put SPOTIFY_CLIENT_SECRET
 say "TOKEN_KEY — generated"
 openssl rand -base64 32 | npx wrangler secret put TOKEN_KEY
 
@@ -74,14 +69,9 @@ say "deploying (this builds and pushes the audio container — first time takes 
 npx wrangler deploy
 
 echo ""
-echo "Deployed. Two last things:"
-echo ""
-echo "  1. In your Spotify app at developer.spotify.com/dashboard, add this"
-echo "     exact Redirect URI (your deployment's domain + /api/spotify/callback):"
-echo "         https://<your-worker-domain>/api/spotify/callback"
-echo ""
-echo "  2. Open https://<your-worker-domain>/host, unlock with your"
-echo "     passphrase, and connect Spotify."
+echo "Deployed. One last thing: open https://<your-worker-domain>/host,"
+echo "unlock with your passphrase, and connect Spotify — approve once, paste"
+echo "the address of the page Spotify leaves you on, done."
 echo ""
 echo "Then open a room, start streaming, and pick 'Downbeat' under Devices"
 echo "in any Spotify app. That's the whole thing."

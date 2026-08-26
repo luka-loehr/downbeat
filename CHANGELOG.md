@@ -27,15 +27,19 @@ instance in minutes.
   budget steers on the worst ring cushion any member reports, exactly as the
   Mac host did. All-rustls, statically-linked libopus, 172 MB image, health
   port doubling as the container readiness probe.
-- **Server-side Spotify OAuth** (`src/worker/spotify.ts`): Authorization
-  Code + PKCE with the callback on the deployment's own domain — no
-  localhost, no manual token pasting. Single-operator by design: starting
-  the flow requires the host passphrase, so only the deployment's owner can
-  attach a Spotify account. Only the refresh token is stored, AES-GCM
-  encrypted under a Worker-secret key; the client secret and refresh token
-  never reach the container, which is handed hour-lived access tokens on
-  demand (`/api/source/token`). Refresh rotation handled; `streaming` scope
-  verified at connect; non-Premium accounts warned at connect time.
+- **Server-side Spotify auth** (`src/worker/spotify.ts`): Authorization
+  Code + PKCE as a public client, against the client id librespot itself
+  speaks as — measured to be the only identity Spotify Connect's login5
+  endpoint accepts (Web-API developer-app tokens are refused outright, so
+  the "bring your own Spotify app" model is impossible by construction, and
+  with it goes the whole developer-app setup: no app registration, no
+  client secret, no redirect URIs). The operator approves once and pastes
+  the address of the dead localhost page Spotify strands them on; the
+  exchange happens in the Worker. Single-operator by design: starting the
+  flow requires the host passphrase. Only the refresh token is stored,
+  AES-GCM encrypted under a Worker-secret key; the container is handed
+  hour-lived access tokens on demand (`/api/source/token`), with refresh
+  rotation handled.
 - **Per-room container supervision** (`src/worker/source-container.ts`):
   a Durable Object per room drives the raw `ctx.container` API — start with
   per-room env, health-proxied status, crash restarts with exponential
