@@ -1,0 +1,36 @@
+[package]
+name = "downbeat-source"
+version = "0.5.0"
+edition = "2021"
+description = "Cloud audio source: a Spotify Connect device that streams into a Downbeat room"
+
+[[bin]]
+name = "downbeat-source"
+path = "src/main.rs"
+
+[dependencies]
+# The Connect protocol and in-process decoded audio. We use librespot as a
+# library, not the binary: it registers as a Connect device under the user's
+# account and hands us decoded PCM through a custom Sink — no screen capture,
+# no virtual device, no TUI to scrape.
+librespot = { version = "0.6", default-features = false }
+
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.24", features = ["connect", "rustls-tls-native-roots"], default-features = false }
+futures-util = "0.3"
+
+# 44.1 kHz (Spotify) -> 48 kHz (Opus + the rest of Downbeat).
+rubato = "0.15"
+# libopus binding; libopus is installed in the container image.
+opus = "0.3"
+
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"

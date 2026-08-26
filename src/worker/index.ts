@@ -1,10 +1,21 @@
 import { RoomDO } from "./room-do";
+import { SourceContainer } from "./source-container";
+import type { SourceEnv } from "./source-container";
+import {
+  AUTH_TTL_MS,
+  sourceToken,
+  spotifyCallback,
+  spotifyLogin,
+  spotifyLogout,
+  spotifyStatus,
+} from "./spotify";
+import { json, mintHostToken, sha256Hex, timingSafeEqual, verifyHostToken } from "./auth";
 import { generateCode, isValidCode, normalizeCode } from "../shared/code";
 import { BUILD_ID } from "../shared/build";
 import { CODE_ALPHABET, CODE_LENGTH } from "../shared/protocol";
 import type { Track } from "../shared/protocol";
 
-export { RoomDO };
+export { RoomDO, SourceContainer };
 
 /** 25 MB per track: comfortably a 10-minute 320 kbps MP3. */
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
@@ -58,6 +69,34 @@ export default {
         return await upload(request, env);
       }
 
+      // The operator's Spotify connection (see spotify.ts).
+      if (pathname === "/api/spotify/login" && request.method === "POST") {
+        return await spotifyLogin(request, env);
+      }
+      if (pathname === "/api/spotify/callback") {
+        return await spotifyCallback(request, env);
+      }
+      if (pathname === "/api/spotify/status" && request.method === "POST") {
+        return await spotifyStatus(request, env);
+      }
+      if (pathname === "/api/spotify/logout" && request.method === "POST") {
+        return await spotifyLogout(request, env);
+      }
+
+      // The cloud source: its container lifecycle and its access tokens.
+      if (pathname === "/api/source/token" && request.method === "POST") {
+        return await sourceToken(request, env);
+      }
+      if (pathname === "/api/source/start" && request.method === "POST") {
+        return await sourceStart(request, env);
+      }
+      if (pathname === "/api/source/stop" && request.method === "POST") {
+        return await sourceStop(request, env);
+      }
+      if (pathname === "/api/source/status") {
+        return await sourceStatus(request, env);
+      }
+
       if (pathname.startsWith("/audio/")) {
         return await serveAudio(request, env, ctx, pathname.slice("/audio/".length));
       }
@@ -99,6 +138,11 @@ async function sweep(env: Env): Promise<void> {
 
   await env.DB.prepare("DELETE FROM sessions WHERE expires_at < ?1 OR (revoked = 1 AND last_seen_at < ?2)")
     .bind(now, cutoff)
+    .run();
+
+  // Abandoned OAuth handshakes: dead a few minutes after they began.
+  await env.DB.prepare("DELETE FROM spotify_auth WHERE created_at < ?1")
+    .bind(now - AUTH_TTL_MS)
     .run();
 
   // Audio is content-addressed, so the same id can be shared by several rooms.
@@ -201,6 +245,14 @@ async function endRoom(request: Request, env: Env): Promise<Response> {
     return json({ error: "not the host" }, 401);
   }
   await env.DB.prepare("UPDATE sessions SET revoked = 1 WHERE code = ?1").bind(code).run();
+
+  // The room is gone; its source container must not keep running (and
+  // billing) against credentials that just died. Best-effort: on a deployment
+  // without containers the DO answers 503 and there is nothing to stop.
+  await sourceStub(code, env)
+    .fetch("https://source/stop", { method: "POST" })
+    .catch(() => {});
+
   return json({ ok: true });
 }
 
@@ -225,6 +277,72 @@ async function joinRoom(request: Request, env: Env): Promise<Response> {
 
   const id = env.ROOM.idFromName(code);
   return env.ROOM.get(id).fetch(new Request(forward, request));
+}
+
+/* ------------------------------------------------------------------ source */
+
+const sourceStub = (code: string, env: Env) => env.SOURCE.get(env.SOURCE.idFromName(code));
+
+/**
+ * Boot the librespot container for a room. The host token the dashboard
+ * already holds authorizes it; the container inherits that same token as its
+ * credential for joining the room and fetching Spotify access tokens.
+ */
+async function sourceStart(request: Request, env: Env): Promise<Response> {
+  const body = (await request.json().catch(() => ({}))) as {
+    code?: string;
+    hostToken?: string;
+    deviceName?: string;
+    bufferMs?: number;
+  };
+  const code = normalizeCode(body.code ?? "");
+  if (!isValidCode(code)) return json({ error: "bad room code" }, 400);
+  if (!(await verifyHostToken(body.hostToken ?? "", code, env))) {
+    return json({ error: "not the host" }, 401);
+  }
+
+  // No point booting a container that cannot log in.
+  const connected = await env.DB.prepare(
+    "SELECT operator FROM spotify_tokens WHERE operator = 'primary'",
+  ).first();
+  if (!connected) return json({ error: "connect Spotify first" }, 409);
+
+  const bufferMs = Math.round(Math.min(Math.max(body.bufferMs ?? 1500, 700), 3000));
+  const envVars: SourceEnv = {
+    ROOM_CODE: code,
+    HOST_TOKEN: body.hostToken!,
+    WORKER_URL: new URL(request.url).origin,
+    SPOTIFY_CLIENT_ID: env.SPOTIFY_CLIENT_ID,
+    DEVICE_NAME: (body.deviceName || "Downbeat").slice(0, 32),
+    BUFFER_MS: String(bufferMs),
+  };
+  return sourceStub(code, env).fetch("https://source/start", {
+    method: "POST",
+    body: JSON.stringify(envVars),
+  });
+}
+
+async function sourceStop(request: Request, env: Env): Promise<Response> {
+  const body = (await request.json().catch(() => ({}))) as {
+    code?: string;
+    hostToken?: string;
+  };
+  const code = normalizeCode(body.code ?? "");
+  if (!isValidCode(code)) return json({ error: "bad room code" }, 400);
+  if (!(await verifyHostToken(body.hostToken ?? "", code, env))) {
+    return json({ error: "not the host" }, 401);
+  }
+  return sourceStub(code, env).fetch("https://source/stop", { method: "POST" });
+}
+
+async function sourceStatus(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const code = normalizeCode(url.searchParams.get("code") ?? "");
+  if (!isValidCode(code)) return json({ error: "bad room code" }, 400);
+  if (!(await verifyHostToken(url.searchParams.get("hostToken") ?? "", code, env))) {
+    return json({ error: "not the host" }, 401);
+  }
+  return sourceStub(code, env).fetch("https://source/status");
 }
 
 /* ------------------------------------------------------------------ audio */
@@ -327,72 +445,7 @@ async function serveAudio(
   return response;
 }
 
-/* ------------------------------------------------------------------ host tokens */
-
-async function hmacKey(env: Env): Promise<CryptoKey> {
-  const secret = env.HOST_PASSPHRASE ?? "";
-  return crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(`downbeat:${secret}`),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign", "verify"],
-  );
-}
-
-async function mintHostToken(code: string, expiresAt: number, env: Env): Promise<string> {
-  const payload = `${code}.${expiresAt}`;
-  const sig = await crypto.subtle.sign("HMAC", await hmacKey(env), enc(payload));
-  return `${payload}.${b64url(sig)}`;
-}
-
-/**
- * A token is only good if it is BOTH correctly signed and still the session on
- * record. The signature alone cannot be revoked and cannot be superseded by a
- * takeover, so the database is the authority on who currently owns a room.
- */
-async function verifyHostToken(token: string, code: string, env: Env): Promise<boolean> {
-  const parts = token.split(".");
-  if (parts.length !== 3) return false;
-  const [tokenCode, expRaw, sig] = parts;
-  if (tokenCode !== code) return false;
-
-  const exp = Number(expRaw);
-  const now = Date.now();
-  if (!Number.isFinite(exp) || exp < now) return false;
-
-  const expected = await crypto.subtle.sign("HMAC", await hmacKey(env), enc(`${tokenCode}.${expRaw}`));
-  if (!timingSafeEqual(sig, b64url(expected))) return false;
-
-  const row = await env.DB.prepare(
-    "SELECT token_hash FROM sessions WHERE code = ?1 AND revoked = 0 AND expires_at > ?2",
-  )
-    .bind(code, now)
-    .first<{ token_hash: string }>();
-  if (!row) return false;
-  if (!timingSafeEqual(row.token_hash, await sha256Hex(token))) return false;
-
-  await env.DB.prepare("UPDATE sessions SET last_seen_at = ?2 WHERE code = ?1")
-    .bind(code, now)
-    .run();
-  return true;
-}
-
 /* ------------------------------------------------------------------ small helpers */
-
-/** Constant-time compare so a wrong passphrase leaks no timing signal. */
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
-
-const enc = (s: string) => new TextEncoder().encode(s);
-
-async function sha256Hex(text: string): Promise<string> {
-  return hex(await crypto.subtle.digest("SHA-256", enc(text)));
-}
 
 /** Titles arrive percent-encoded because HTTP headers cannot carry UTF-8. */
 function decodeTitle(raw: string | null): string {
@@ -406,17 +459,4 @@ function decodeTitle(raw: string | null): string {
 
 function hex(buf: ArrayBuffer): string {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function b64url(buf: ArrayBuffer): string {
-  let s = "";
-  for (const b of new Uint8Array(buf)) s += String.fromCharCode(b);
-  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "content-type": "application/json; charset=utf-8" },
-  });
 }

@@ -25,11 +25,16 @@ jobs:
       - name: Build
         run: npm run build
 
-  cli:
-    name: macOS CLI
-    runs-on: macos-15
+  source:
+    name: Cloud source (Rust)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Build
-        working-directory: cli
-        run: swift build -c release
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source
+      - name: Check
+        working-directory: source
+        # --locked: the committed lockfile pins the vergen family to versions
+        # that build together; a fresh resolution would not.
+        run: cargo check --locked

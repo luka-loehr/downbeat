@@ -3,6 +3,71 @@
 All notable changes to this project, with the conditions under which each
 measurement was taken.
 
+## [0.5.0] — 2026-08-27
+
+Into the cloud, whole. The Mac is out of the loop: the audio source is now a
+Rust process in a Cloudflare Container, playing from the operator's own
+Spotify account as a Spotify Connect device. A hard cutover — the Swift CLI
+is deleted, and the repository is restructured so anyone can deploy their own
+instance in minutes.
+
+### Added
+- **`source/` — the cloud audio source.** librespot 0.6 as a library:
+  registers as a Connect device named "Downbeat" under the operator's
+  account, receives decoded PCM in-process through a custom sink, resamples
+  44.1 → 48 kHz (rubato), encodes 20 ms Opus frames at 128 kbit/s, stamps
+  them against the room clock (the same Cristian's-algorithm estimator,
+  ported to Rust), and streams them to the room's Durable Object as
+  `role=source` — the exact wire contract the Mac host spoke, so every
+  deployed listener plays it unchanged. Two independent supervision loops:
+  the Spotify session refetches a fresh access token from the Worker on
+  every reconnect (an env-var token would be an hour stale), and the room
+  websocket reconnects with a fresh clock burst under the same stream epoch,
+  so listeners play straight through either outage. The adaptive delay
+  budget steers on the worst ring cushion any member reports, exactly as the
+  Mac host did. All-rustls, statically-linked libopus, 172 MB image, health
+  port doubling as the container readiness probe.
+- **Server-side Spotify OAuth** (`src/worker/spotify.ts`): Authorization
+  Code + PKCE with the callback on the deployment's own domain — no
+  localhost, no manual token pasting. Single-operator by design: starting
+  the flow requires the host passphrase, so only the deployment's owner can
+  attach a Spotify account. Only the refresh token is stored, AES-GCM
+  encrypted under a Worker-secret key; the client secret and refresh token
+  never reach the container, which is handed hour-lived access tokens on
+  demand (`/api/source/token`). Refresh rotation handled; `streaming` scope
+  verified at connect; non-Premium accounts warned at connect time.
+- **Per-room container supervision** (`src/worker/source-container.ts`):
+  a Durable Object per room drives the raw `ctx.container` API — start with
+  per-room env, health-proxied status, crash restarts with exponential
+  backoff via alarms, and two refusals that keep the bill honest: no
+  restart past the session's 24 h lifetime, none past 40 crashes. Ending a
+  room stops its container; a container whose credentials are revoked
+  confirms 401 ten times and exits on its own.
+- **The host console** (`/host`): the Mac dashboard reborn as a page.
+  Unlock with the passphrase, connect Spotify, open a room (code + QR +
+  copyable link), start/stop the cloud player, and watch every device live —
+  RTT, clock confidence, ring cushion, underruns, and the room's actual
+  inter-device playout spread in milliseconds, fed by a read-only websocket
+  seat that never becomes a speaker.
+- **`scripts/setup.sh`**: one guided, idempotent first deploy — creates the
+  bucket and database, wires the database id into `wrangler.jsonc`, prompts
+  the four secrets, applies migrations, deploys Worker and container.
+
+### Changed
+- The README is rewritten for self-hosters: what a night looks like, the
+  full deploy walkthrough, and an honest cost table — what the Cloudflare
+  free plan covers (rooms, sync, file mode) and what needs Workers Paid
+  (Containers, i.e. the Spotify source), with a worked example of a real
+  party's usage against the included allowances. New banner to match.
+- The landing page sends hosts to the console; guests' flow is unchanged.
+
+### Removed
+- **The entire Swift CLI** (`cli/`), the macOS release workflow, and
+  `install.sh`. No Core Audio tap, no local playback, no terminal QR — the
+  host machine no longer exists. Room, protocol, worklet and engine are
+  untouched: a phone that joined a 0.4.0 room joins a 0.5.0 room the same
+  way.
+
 ## [0.4.0] — 2026-08-26
 
 Fully native. One Swift binary on the Mac; shared memory to the speaker in

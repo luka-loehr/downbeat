@@ -10,9 +10,25 @@
     "not_found_handling": "single-page-application"
   },
   "durable_objects": {
-    "bindings": [{ "name": "ROOM", "class_name": "RoomDO" }]
+    "bindings": [
+      { "name": "ROOM", "class_name": "RoomDO" },
+      { "name": "SOURCE", "class_name": "SourceContainer" }
+    ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RoomDO"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RoomDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["SourceContainer"] }
+  ],
+  // The librespot audio source. `wrangler deploy` builds the Dockerfile and
+  // pushes it to Cloudflare's registry; one instance per active room.
+  "containers": [
+    {
+      "class_name": "SourceContainer",
+      "image": "./source/Dockerfile",
+      "max_instances": 2,
+      "instance_type": "basic"
+    }
+  ],
   "r2_buckets": [{ "binding": "AUDIO", "bucket_name": "downbeat-audio" }],
   "d1_databases": [
     {

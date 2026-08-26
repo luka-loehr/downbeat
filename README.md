@@ -1,270 +1,245 @@
 ![Downbeat banner](docs/assets/banner.svg)
 
-[![Worker](https://img.shields.io/badge/Cloudflare-Workers%20%2B%20Durable%20Objects-F38020?style=flat&logo=cloudflare&logoColor=white)](https://developers.cloudflare.com/durable-objects/)
-[![CLI](https://img.shields.io/badge/CLI-Swift%206%20%C2%B7%20one%20native%20binary-F05138?style=flat&logo=swift&logoColor=white)](cli/)
-[![Codec](https://img.shields.io/badge/audio-Opus%2020%20ms%20%C2%B7%2048%20kHz-3ef2a0?style=flat)](#5-how-the-synchronisation-works)
-[![Drift](https://img.shields.io/badge/steady--state%20drift-0.00%20ms-3ef2a0?style=flat)](#5-how-the-synchronisation-works)
+[![Worker](https://img.shields.io/badge/Cloudflare-Workers%20·%20Durable%20Objects%20·%20Containers-F38020?style=flat&logo=cloudflare&logoColor=white)](https://developers.cloudflare.com/containers/)
+[![Source](https://img.shields.io/badge/source-Rust%20·%20librespot%20·%20Spotify%20Connect-CE422B?style=flat&logo=rust&logoColor=white)](source/)
+[![Codec](https://img.shields.io/badge/audio-Opus%2020%20ms%20·%2048%20kHz-3ef2a0?style=flat)](#6-how-the-synchronisation-works)
+[![Drift](https://img.shields.io/badge/steady--state%20drift-0.00%20ms-3ef2a0?style=flat)](#6-how-the-synchronisation-works)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat)](LICENSE)
 
-**Play one song on every phone in the room, on the same millisecond.**
+**Play Spotify on every phone in the room, on the same millisecond.**
 
-Point a camera at the QR code your Mac prints. Tap once. That is the entire
-setup — no app, no account, no pairing. Whatever your Mac is playing comes out
-of every phone at the same instant, and stays there.
+Deploy Downbeat to your own Cloudflare account, connect your own Spotify
+account once, and a device called **“Downbeat”** appears under Devices in your
+Spotify app — anywhere in the world, on any of your devices. Press play on it,
+and every phone that scanned your room's QR code becomes a speaker, all of
+them on the same instant, and they stay there for hours.
 
-Spotify's own group session drifts by roughly a second between devices, because
-it streams at playback time and every device buffers differently. Downbeat
-inverts that: the audio is on your phone **before** a deadline exists, and all
-that crosses the network at playback time is a timestamp. Network jitter then
-has nothing left to affect.
+No app, no account for guests, no computer running at the party. The host's
+"hardware" is a Rust process in a Cloudflare container; the host's console is
+a web page; the guests' player is a browser tab.
 
-```bash
-git clone https://github.com/luka-loehr/downbeat && cd downbeat
-./scripts/install.sh          # builds the one native binary Downbeat is
-downbeat login                # once, against your own deployment
-downbeat host                 # prints a QR code
-```
+Spotify's own group session drifts by roughly a second between devices,
+because it streams at playback time and every device buffers differently.
+Downbeat inverts that: audio arrives on every phone well **before** its
+deadline, and what the network delivers late has already been played from a
+buffer that never ran dry. All that has to agree across the room is a clock —
+and clocks can be made to agree to a fraction of a millisecond.
 
-Downbeat runs on **your** Cloudflare account, not a service someone else
-operates: one Worker, one Durable Object, one R2 bucket, one D1 database, all
-comfortably inside the free tiers except Durable Objects. See
-[§7](#7-deploying-your-own) to stand one up.
+## 1. A night, from the host's side
 
-## 1. Results
+1. Open `https://your-deployment/host`, unlock with your passphrase.
+2. **Connect Spotify** — once, ever. The connection survives restarts.
+3. **Open a room** — a six-letter code and a QR code appear.
+4. **Start streaming** — a librespot container boots in Cloudflare's cloud
+   and registers as a Spotify Connect device under your account.
+5. On your phone: Spotify → Devices → **Downbeat** → play.
 
-Measured against the production deployment on `downbeat.lukaloehr.com` from
-Karlsruhe (Cloudflare VIE edge), 2026-08-23.
+Guests scan the QR, tap once (browsers refuse to start audio without a
+gesture), and are in sync. The console shows every connected device live:
+round-trip time, clock confidence, buffer health, and the actual inter-device
+spread in milliseconds.
 
-| what | measured |
-| --- | ---: |
-| Steady-state drift, 100 ppm crystal, simulated hour | **0.0000 ms** |
-| ... and between two devices with opposite crystals | **0.0000 ms** |
-| Room-clock spread across three clients, 90 probes each | **0.47 ms** |
-| Inter-device playout spread, 4 min, ±110 ppm crystals | **2.4 ms median** |
-| ... and whether it accumulates (first half → second half) | **flat** |
-| Live stream over 4 minutes, packets late | **0 of 11,980** |
-| Distinct start instants across 3 clients (file mode) | **1** |
-| Opus packet rate / bitrate | **50 /s · ~110 kbit/s** |
-
-> **Status: working, v0.1.0.** File playback and live capture both run end to
-> end. The inter-device figures come from three virtual clients running the
-> real clock estimator and the real control law against the deployed server and
-> a real capture source; the clock numbers are shared with the browser, while
-> the rest carries some jitter from the harness, whose loop is a JS timer
-> rather than an audio clock. A calibrated acoustic measurement across physical
-> devices has **not** been taken, so these describe the timing pipeline, not
-> the air in the room -- where 34 cm of distance is already a millisecond.
-
-## 2. System
-
-- **Nothing streams at playback time.** For file playback the audio is fully
-  decoded on every device *before* a deadline is chosen, so network jitter is
-  mathematically irrelevant to when a sample is heard. All that crosses the
-  wire at playback time is one number.
-- **An arm barrier, not a countdown.** No device is given a start instant until
-  every device reports the track decoded and ready.
-- **A drift controller that holds the line.** Device crystals differ by
-  10–100 ppm, so two phones drift apart by ~1 ms every 10–100 s. Error is
-  erased with a ±0.4 % playback-rate nudge — about 7 cents of pitch, applied as
-  a ramp, inaudible on music.
-- **Live capture from a Mac** via a Core Audio process tap: Spotify (or any
-  app) is captured *and muted at the real output* in one step, so the host
-  hears it back through Downbeat in step with every phone.
-- **One native binary on the host.** Capture, Opus, transport, local playback
-  and the terminal dashboard are a single Swift executable — no Node runtime,
-  no helper processes, a few tens of megabytes and a few percent of one core.
-- **Shared memory to the speaker.** In the browser, decoded audio is written
-  straight into a SharedArrayBuffer ring the AudioWorklet reads on the
-  realtime thread: zero copies, zero message ports, and main-thread jank
-  cannot touch playback. An adaptive delay budget then trims itself to the
-  smallest value the room's weakest listener can actually carry.
-- **Sessions are real server state.** A signed token cannot be revoked and
-  cannot stop two hosts claiming one room, so ownership lives in D1 with
-  explicit takeover, and an hourly cron sweeps expired sessions and orphaned
-  audio.
-- **The player has no buttons.** A joined phone is a speaker, not a remote:
-  every control is a way for one device to end up out of step with the others.
-
-## 3. Architecture
+## 2. Architecture
 
 ```text
-  Spotify.app  ──┐
-                 │  Core Audio process tap (original muted)
+      your Spotify app (phone, laptop, anywhere)
+                 │  Spotify Connect — remote control only
                  ▼
-        downbeat CLI (Swift)  ── same room clock as the browsers
-                 │  Opus 20 ms frames, ~110 kbit/s
-                 ▼
-  ┌────────────────────────────────────────────────────┐
-  │  Worker  — static assets, rooms, sessions, R2 proxy │
-  └────────────────────────────────────────────────────┘
-                 │
-                 ▼
-     ┌───────────────────────────┐        D1: sessions, uploads
-     │  RoomDO (Durable Object)  │        R2: uploaded audio
-     │  · WebSocket hub          │        Cron: hourly sweep
-     │  · TIME SERVER            │
-     │  · queue + arm barrier    │
-     │  · live relay (tagged)    │
-     └───────────────────────────┘
-                 │
-    ┌────────────┼────────────┐
-    ▼            ▼            ▼
-  iPhone       iPad         Mac        shared-memory ring,
-                                       indexed by stream sample
+   ┌──────────────────────────────┐
+   │  downbeat-source (Rust)      │   Cloudflare Container
+   │  · librespot Connect device  │   started per room by its
+   │  · decodes in-process        │   Durable Object, scale-to-zero
+   │  · 44.1 → 48 kHz, Opus      │
+   │  · stamps every 20 ms frame  │
+   └──────────────┬───────────────┘
+                  │  Opus over WebSocket, ~110 kbit/s
+                  ▼
+   ┌──────────────────────────────┐    D1: sessions, tokens (encrypted)
+   │  RoomDO (Durable Object)     │    R2: uploaded tracks (file mode)
+   │  · WebSocket hub             │    Cron: hourly sweep
+   │  · TIME SERVER               │
+   │  · live relay (tagged)       │
+   └──────────────┬───────────────┘
+                  │
+     ┌────────────┼────────────┐
+     ▼            ▼            ▼
+   iPhone       iPad        laptop      each: AudioWorklet reading a
+                                        SharedArrayBuffer ring, indexed
+                                        by absolute stream sample
 ```
 
 | path | contents |
 | --- | --- |
-| `src/worker/index.ts` | Router, sessions, host tokens, R2 range serving, cron sweep |
+| `source/` | the cloud source: librespot as a library, resampler, Opus, room clock, health port |
+| `src/worker/index.ts` | router, sessions, host tokens, R2 range serving, cron sweep |
+| `src/worker/spotify.ts` | server-side OAuth (PKCE), encrypted refresh-token store, source tokens |
+| `src/worker/source-container.ts` | per-room container supervisor: start, stop, status, crash restarts |
 | `src/worker/room-do.ts` | Durable Object: WS hub, time server, arm barrier, live relay |
-| `src/audio/clock.ts` | Room clock — Cristian's algorithm, min-RTT filtering, slew |
-| `src/audio/engine.ts` | Decode-ahead playback, drift control, live player |
-| `src/audio/room.ts` | Connection, reconnect, state reconciliation |
+| `src/audio/clock.ts` | room clock — Cristian's algorithm, min-RTT filtering, slew |
+| `src/audio/engine.ts` | decode-ahead playback, drift control, live player |
 | `public/live-processor.js` | AudioWorklet reading the shared-memory ring |
-| `cli/Sources/downbeat/` | the host binary: tap, Opus, transport, local playback, dashboard, QR |
+| `src/ui/` | the door, the room, the host console |
 | `migrations/` | D1 schema |
 
-## 4. Quickstart
+## 3. Deploy your own
 
-### Listening
+Downbeat is not a hosted service and has no central anything. Each deployment
+is one person's: your Cloudflare account, your Spotify account, your rooms.
 
-Open the room URL or scan the QR, tap once, done. The tap is not decoration —
-browsers refuse to start audio without a user gesture.
+**You need:**
 
-### Hosting from a Mac
+- A **Cloudflare account** on the [Workers Paid plan](https://developers.cloudflare.com/workers/platform/pricing/)
+  ($5/month — Containers require it; see [§4](#4-what-it-costs) for what the
+  free plan can and cannot do).
+- A **Spotify Premium** account (Spotify Connect refuses to play on free
+  accounts).
+- A **Spotify app** of your own: [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard)
+  → *Create app* → any name → check the **Web API** box. Two minutes.
+- Node 20+, Docker running (the audio source deploys as a container image).
+
+**Then:**
 
 ```bash
-./scripts/install.sh      # or: cd cli && swift build -c release
-
-downbeat login            # passphrase once
-downbeat host             # taps Spotify, draws the dashboard, opens the room
+git clone https://github.com/luka-loehr/downbeat && cd downbeat
+./scripts/setup.sh
 ```
 
-While hosting, the terminal is live: `m` mutes this Mac without touching
-anyone else, `+` and `-` set its level, and `s` switches capture to another
-app — Spotify, Apple Music, a browser tab, or everything at once — without
-interrupting the room.
+The script creates the bucket and database on your account, wires the ids,
+prompts for the four secrets, and deploys. When it finishes, do the two
+manual steps it prints:
 
-Useful flags:
+1. In your Spotify app's settings, add the **Redirect URI**
+   `https://<your-worker-domain>/api/spotify/callback` (the exact domain the
+   deploy printed — `<name>.<account>.workers.dev`, or your own custom
+   domain if you point `routes` in `wrangler.jsonc` at one).
+2. Open `https://<your-worker-domain>/host` and connect Spotify.
 
-| flag | effect |
-| --- | --- |
-| `--code PARTY7` | claim a fixed room code instead of a random one |
-| `--buffer 3000` | starting delay budget (default 2000 ms); the host then adapts it toward the smallest value the room's listeners can carry |
-| `--min-buffer 500` | the adaptive budget's floor (default 350 ms) |
-| `--no-adapt` | pin the budget at `--buffer` |
-| `--source system` | capture everything the Mac plays, not just Spotify |
-| `--takeover` | take a room already held by another session |
-| `--no-mute` | leave the source audible locally |
-| `--no-local` | do not play on this Mac |
-| `--offline` | local capture and playback only, no room |
+Every later deploy is just `npx wrangler deploy`. Pushing to `main` deploys
+automatically if you add `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`
+to your GitHub repository's Actions secrets.
 
-## 5. How the synchronisation works
+> The secrets, for reference: `HOST_PASSPHRASE` (unlocks your console),
+> `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` (from the dashboard), and
+> `TOKEN_KEY` (32 random bytes, base64 — encrypts the stored Spotify refresh
+> token so a leaked database hands out nothing usable).
 
-**The clock.** Each client probes the Durable Object over its WebSocket:
-send `t0`, the DO replies with `t1`, the client stamps `t2`.
+## 4. What it costs
+
+| | **Free plan** | **Workers Paid — $5/month** |
+| --- | --- | --- |
+| Rooms, sync, guest playback | ✓ | ✓ |
+| File mode (upload tracks, play in sync) | ✓ for small parties | ✓ |
+| **Spotify cloud source** | ✗ — Containers require Paid | ✓ |
+| Workers requests | 100k/day | 10M/month included |
+| Durable Objects | ✓ (SQLite-backed), 100k req/day | 1M req/month included |
+| D1 / R2 | 5 GB / 10 GB free | same free allowances |
+| Containers | not available | 25 GiB-hours memory, 375 vCPU-minutes, 200 GB-hours disk included monthly |
+
+What a real night uses: the source runs on a **basic** instance (1 GiB, ¼
+vCPU). A four-hour party consumes ~4 GiB-hours of the 25 included, ~60 of the
+375 included vCPU-minutes, and a fraction of a gigabyte of transfer. **Several
+parties a month fit inside the $5 with nothing left over to pay.** The
+container scales to zero when you stop it (or when the room dies), and the
+supervisor refuses to restart a container whose credentials have expired, so
+nothing idles on your bill.
+
+## 5. Security & legal shape
+
+- **Single operator, by design.** Only the person holding `HOST_PASSPHRASE`
+  can connect a Spotify account — this is not, and is deliberately not
+  built to be, a multi-tenant service where strangers log in. You stream
+  your own account, on your own deployment, to your own party.
+- The Spotify **client secret never leaves the Worker**. The container
+  receives only hour-lived access tokens, fetched on demand; the refresh
+  token is stored AES-GCM-encrypted under a key that exists only as a Worker
+  secret.
+- OAuth is Authorization Code + PKCE, the state/verifier held server-side,
+  each state consumable exactly once.
+- Host and source roles are granted only against an HMAC-signed token that
+  is *also* checked against the session on record — a signature alone cannot
+  be revoked, so the database is the authority.
+- Audio is decoded in RAM and streamed; nothing is written to disk, nothing
+  is stored, nothing can be downloaded. Don't run this as a public service;
+  it is built for your own living room, and the licenses on your account
+  reach exactly that far.
+
+## 6. How the synchronisation works
+
+**The clock.** Each client — and the source container, running the same
+algorithm in Rust — probes the Durable Object over its WebSocket: send `t0`,
+the DO replies `t1`, the client stamps `t2`.
 
 ```
 offset = t1 − (t0 + t2) / 2        rtt = t2 − t0
 ```
 
 Only probes close to the fastest round trip are believed — a slow round trip
-has more room to hide the path asymmetry that Cristian's algorithm cannot see.
-The estimate is stepped during the opening burst and slewed afterwards.
+has more room to hide the path asymmetry Cristian's algorithm cannot see. The
+estimate is stepped during the opening burst and slewed afterwards. Two things
+make this work on Cloudflare specifically: Workers freeze `Date.now()`
+between I/O as a Spectre mitigation, and in a WebSocket handler the message
+arrival *is* that I/O — so the timestamp is fresh exactly when it is taken as
+the handler's first statement. And a shared clock error cancels: if the DO is
+40 ms from UTC, every device is 40 ms from UTC together, and they still agree
+with each other.
 
-Two things make this work on Cloudflare specifically:
+**The stream.** The source stamps every 20 ms Opus frame with a room-clock
+play deadline and an absolute sample index. The deadline anchors the stream
+once; the sample index is what receivers actually place by, so packet
+placement is contiguous *by construction* — the room→context clock mapping
+never sits in the signal path where its sub-millisecond corrections would
+round to one-sample holes fifty times a second.
 
-- Workers **freeze `Date.now()` between I/O** as a Spectre mitigation. In a
-  WebSocket handler the message arrival *is* that I/O, so the timestamp is
-  fresh — provided it is taken before any other work. It is the first
-  statement of the handler, deliberately.
-- **A shared clock error cancels.** Sync is relative: if the DO clock is 40 ms
-  from UTC, every device is 40 ms from UTC *together* and they still agree with
-  each other. Only per-device jitter matters, and min-RTT filtering removes it.
+**The output.** Decoded audio is written into a **SharedArrayBuffer ring read
+directly by the AudioWorklet** on the realtime audio thread: no copies, no
+message ports, main-thread jank physically cannot stutter playback (pages are
+served cross-origin isolated to make that legal). A PI controller nudges each
+device's playback rate by at most 0.3 % — about five cents of pitch, applied
+as a ramp — to hold its output against the room clock, which is how devices
+with crystals 100 ppm apart stay put for ten hours.
 
-**Scheduling.** `getOutputTimestamp()` pairs a context time with the moment
-that sample reaches the output, so it already carries the hardware latency.
-The mapping collapses to one scalar, `ctx = room/1000 + k`.
+**The budget.** The delay between Spotify and the room's speakers is not a
+constant: every member continuously reports the worst cushion its ring
+actually had, and the source steers the delay budget toward the smallest
+value the room's weakest listener can carry — growing immediately when anyone
+gets close to the edge, shrinking by slow creep when the whole room has slack,
+and slewing every adjustment so no packet ever jumps.
 
-**Live playback** writes decoded audio into a **SharedArrayBuffer ring
-indexed by absolute stream sample**, read directly by the AudioWorklet on the
-realtime audio thread — no copies, no message ports, so a janky main thread
-cannot stutter playback (the pages are served cross-origin isolated to make
-that legal). The alternative — scheduling each 20 ms packet as its
-own source node — puts that mapping in the signal path fifty times a second,
-and every scrap of its jitter becomes a gap between two packets. That is
-audible as a stutter, and it is exactly the bug this design removes: here the
-mapping only decides *where in the ring* audio lands, and the output itself is
-unconditionally continuous.
+## 7. What this deliberately does not do
 
-## 6. What this deliberately does not do
+- **No Web Playback SDK, no API streaming.** Spotify's Web API caps new apps
+  at five users in dev mode — irrelevant here, because exactly one user (you)
+  ever authorizes, for control and login only. The audio path is Spotify
+  Connect via librespot, under your own Premium account.
+- **No multi-tenant hosting.** One deployment, one operator, one Spotify
+  account. Anything else is a different product with different legal weather.
+- **No WebRTC.** It minimises latency and tolerates drift, resampling
+  independently per peer — precisely the wrong trade. Downbeat accepts a
+  fixed delay and guarantees identical playout instants.
+- **No player controls for guests.** A joined phone is a speaker, not a
+  remote; every control is a way for one device to end up out of step.
+- **No claim of acoustic perfection.** Sound travels 34 cm per millisecond;
+  two speakers three metres apart are ~9 ms apart at your ear no matter what
+  software does. Downbeat removes the software error; the room is the room.
 
-- **No Spotify Web API.** As of February 2026 new apps are capped at one client
-  ID and five users, the app owner must hold Premium, and extended access
-  requires a registered company with 250k monthly active users. A
-  Spotify-powered room would be permanently limited to five Premium listeners.
-  Downbeat captures the Mac's audio output instead and never touches the API.
-- **No phone-as-source.** `getDisplayMedia` does not work in any mobile
-  browser — Safari exposes the API but audio never arrives — and there is no
-  other route to system audio on iOS or Android. The host is a Mac.
-- **No WebRTC.** It is built to minimise latency and tolerate drift, resampling
-  independently per peer. That destroys the one property this project exists
-  for. Downbeat accepts a fixed delay and guarantees identical playout instants
-  instead.
-- **No per-device latency slider in the player.** Timing is the engine's job.
-  The per-device offset still exists in the engine, at zero, as the hook
-  Bluetooth speakers will need.
-- **No claim of perfect synchronisation.** Sound travels 34 cm per millisecond,
-  so two speakers three metres apart are ~9 ms apart at any listener no matter
-  what the software does. Downbeat removes the software error; the room is the
-  room.
-
-## 7. Deploying your own
-
-Downbeat is not a hosted service. It is a thing you run, and the whole of it is
-in this repository.
-
-```bash
-npm install
-npx wrangler r2 bucket create downbeat-audio
-npx wrangler d1 create downbeat-sessions      # put the id in wrangler.jsonc
-npx wrangler d1 migrations apply downbeat-sessions --remote
-npx wrangler secret put HOST_PASSPHRASE       # gates room creation and uploads
-npm run build && npx wrangler deploy
-```
-
-Point `routes` in `wrangler.jsonc` at a hostname on a zone you control, or drop
-it and use the `*.workers.dev` URL. Then on the Mac that will host:
-
-```bash
-./scripts/install.sh
-DOWNBEAT_URL=https://your-worker.example.com downbeat login
-downbeat host
-```
-
-Requires **Workers Paid** for Durable Objects, and macOS 15+ on the host.
-Listeners need nothing but a modern browser (the pages are served
-cross-origin isolated for shared-memory audio).
-
-### Working on it
+## 8. Working on it
 
 ```bash
 npm run typecheck        # worker + web
 npm test                 # clock estimator, drift controller, room codes
 npm run build
-cd cli && swift build -c release
-./.build/release/downbeat selftest      # Opus encoder against live capture
-./.build/release/downbeat selftest-qr   # renders a QR and decodes it back
+
+cd source
+cargo check --locked     # the Rust source (lockfile pins a vergen family that builds)
+docker build .           # what wrangler deploy ships
 ```
 
-`selftest-qr` is not cosmetic: printing something that *looks* like a QR code
-and printing one a phone can actually scan differ in ways the eye cannot see,
-so the rendered modules are fed back through Vision and compared.
+Local Worker development: `npx wrangler dev` (containers run locally through
+Docker). CI typechecks, tests and builds both halves on every push; pushes to
+`main` deploy.
 
-Deployment runs from GitHub Actions on push to `main`; tagging `v*` builds a
-universal CLI binary and attaches it to a release.
+## 9. License
 
-## 8. License
-
-[MIT](LICENSE). Downbeat plays audio you provide or that your own machine is
-already playing; it circumvents no protection and ships no content.
+[MIT](LICENSE). Downbeat carries audio your own accounts and devices are
+already entitled to play, to speakers in the same room. What you point it at
+is your responsibility, not the software's.

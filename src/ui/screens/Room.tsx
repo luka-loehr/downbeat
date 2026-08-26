@@ -170,7 +170,7 @@ export function Room({ code, hostToken }: { code: string; hostToken: string | nu
         )}
       </footer>
 
-      {/* The web host keeps file transport; the CLI host does not need it. */}
+      {/* File transport, for a host playing uploaded tracks instead of Spotify. */}
       {isHost && st && conn && hostToken && !live && (
         <section className="mt-8">
           <div className="staff mb-5" />

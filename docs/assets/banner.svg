@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="420" viewBox="0 0 1280 420" role="img" aria-label="Downbeat — one song, every phone, the same millisecond">
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="420" viewBox="0 0 1280 420" role="img" aria-label="Downbeat — play Spotify on every phone in the room, on the same millisecond">
   <title>Downbeat</title>
   <defs>
     <linearGradient id="sky" x1="0" y1="0" x2="0.35" y2="1">
@@ -11,11 +11,9 @@
       <stop offset="55%" stop-color="#ff5f1f" stop-opacity="0.07"/>
       <stop offset="100%" stop-color="#ff5f1f" stop-opacity="0"/>
     </radialGradient>
-    <linearGradient id="beam" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%" stop-color="#3ef2a0" stop-opacity="0"/>
-      <stop offset="18%" stop-color="#3ef2a0" stop-opacity="0.55"/>
-      <stop offset="82%" stop-color="#3ef2a0" stop-opacity="0.55"/>
-      <stop offset="100%" stop-color="#3ef2a0" stop-opacity="0"/>
+    <linearGradient id="stream" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#1db954" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#ff5f1f" stop-opacity="0.9"/>
     </linearGradient>
     <linearGradient id="fade" x1="0" y1="0" x2="1" y2="0">
       <stop offset="0%" stop-color="#ff5f1f" stop-opacity="0.05"/>
@@ -34,43 +32,59 @@
     <path d="M80 0v420M240 0v420M400 0v420M560 0v420M720 0v420M880 0v420M1040 0v420M1200 0v420"/>
   </g>
 
-  <circle cx="1010" cy="210" r="235" fill="url(#halo)"/>
+  <circle cx="1030" cy="200" r="225" fill="url(#halo)"/>
 
-  <!-- ============ the downbeat: rings closing on one instant ============ -->
-  <g transform="translate(1010 210)">
-    <circle r="150" fill="none" stroke="#2a2740" stroke-width="1"/>
-    <circle r="118" fill="none" stroke="#39344f" stroke-width="1"/>
-    <circle r="86"  fill="none" stroke="#4a4463" stroke-width="1.5"/>
-    <circle r="86"  fill="none" stroke="#ff5f1f" stroke-width="3" filter="url(#soft)" opacity="0.75"/>
-    <circle r="86"  fill="none" stroke="#ff5f1f" stroke-width="2.5"
-            stroke-dasharray="405 135" stroke-linecap="round" transform="rotate(-90)"/>
-    <!-- tick marks: the graticule of a meter -->
+  <!-- ====== the source: one green node, playing from anywhere ====== -->
+  <g transform="translate(700 200)">
+    <circle r="10" fill="#1db954"/>
+    <circle r="19" fill="none" stroke="#1db954" stroke-width="1.5" opacity="0.55"/>
+    <circle r="29" fill="none" stroke="#1db954" stroke-width="1" opacity="0.28"/>
+    <text x="0" y="52" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="10.5" letter-spacing="2" fill="#56526a">SPOTIFY</text>
+  </g>
+
+  <!-- ====== the stream: 20 ms packets riding one wire to the room ====== -->
+  <g transform="translate(736 200)">
+    <rect x="0" y="-1" width="150" height="2" fill="url(#stream)" opacity="0.35"/>
+    <g fill="url(#stream)">
+      <rect x="10"  y="-3" width="14" height="6" rx="3"/>
+      <rect x="42"  y="-3" width="14" height="6" rx="3"/>
+      <rect x="74"  y="-3" width="14" height="6" rx="3"/>
+      <rect x="106" y="-3" width="14" height="6" rx="3"/>
+    </g>
+  </g>
+
+  <!-- ====== the downbeat: rings closing on one instant ====== -->
+  <g transform="translate(1030 200)">
+    <circle r="144" fill="none" stroke="#2a2740" stroke-width="1"/>
+    <circle r="112" fill="none" stroke="#39344f" stroke-width="1"/>
+    <circle r="80"  fill="none" stroke="#4a4463" stroke-width="1.5"/>
+    <circle r="80"  fill="none" stroke="#ff5f1f" stroke-width="3" filter="url(#soft)" opacity="0.75"/>
+    <circle r="80"  fill="none" stroke="#ff5f1f" stroke-width="2.5"
+            stroke-dasharray="377 126" stroke-linecap="round" transform="rotate(-90)"/>
     <g stroke="#6b6485" stroke-width="1.5" stroke-linecap="round">
-      <path d="M0 -168V-156"/><path d="M0 168V156"/>
-      <path d="M-168 0H-156"/><path d="M168 0H156"/>
+      <path d="M0 -160V-148"/><path d="M0 160V148"/>
+      <path d="M-160 0H-148"/><path d="M160 0H148"/>
     </g>
     <circle r="9" fill="#ff5f1f"/>
     <circle r="20" fill="none" stroke="#ff5f1f" stroke-width="1.5" opacity="0.5"/>
-  </g>
 
-  <!-- ============ four speakers, one line, one instant ============ -->
-  <g transform="translate(700 210)">
-    <rect x="0" y="-1" width="224" height="2" fill="url(#beam)"/>
+    <!-- every phone strikes the same instant -->
     <g fill="#3ef2a0">
-      <rect x="4"   y="-14" width="7" height="28" rx="3.5"/>
-      <rect x="60"  y="-14" width="7" height="28" rx="3.5"/>
-      <rect x="116" y="-14" width="7" height="28" rx="3.5"/>
-      <rect x="172" y="-14" width="7" height="28" rx="3.5"/>
+      <rect x="-115" y="98"  width="6" height="24" rx="3"/>
+      <rect x="-38"  y="118" width="6" height="24" rx="3"/>
+      <rect x="32"   y="118" width="6" height="24" rx="3"/>
+      <rect x="109"  y="98"  width="6" height="24" rx="3"/>
     </g>
     <g fill="#3ef2a0" opacity="0.22">
-      <rect x="4"   y="-26" width="7" height="52" rx="3.5"/>
-      <rect x="60"  y="-26" width="7" height="52" rx="3.5"/>
-      <rect x="116" y="-26" width="7" height="52" rx="3.5"/>
-      <rect x="172" y="-26" width="7" height="52" rx="3.5"/>
+      <rect x="-115" y="88"  width="6" height="44" rx="3"/>
+      <rect x="-38"  y="108" width="6" height="44" rx="3"/>
+      <rect x="32"   y="108" width="6" height="44" rx="3"/>
+      <rect x="109"  y="88"  width="6" height="44" rx="3"/>
     </g>
   </g>
 
-  <!-- ============ waveform running into the downbeat ============ -->
+  <!-- ====== waveform running into the downbeat ====== -->
   <g transform="translate(78 268)" fill="url(#fade)">
     <rect x="0" y="-3" width="5" height="6" rx="2.5"/>
     <rect x="15" y="-7" width="5" height="14" rx="2.5"/>
@@ -94,32 +108,32 @@
     <rect x="285" y="-17" width="5" height="34" rx="2.5"/>
   </g>
 
-  <!-- ============ wordmark ============ -->
+  <!-- ====== wordmark ====== -->
   <text x="78" y="150" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
         font-size="96" font-weight="800" letter-spacing="-4.5" fill="#f2efe9">DOWNBEAT</text>
   <text x="82" y="196" font-family="Georgia, Times New Roman, serif" font-style="italic"
         font-size="31" fill="#ff5f1f">everybody on the one</text>
 
   <text x="78" y="330" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
-        font-size="13.5" letter-spacing="2.4" fill="#8b879b">ONE SONG · EVERY PHONE · THE SAME MILLISECOND</text>
+        font-size="13.5" letter-spacing="2.4" fill="#8b879b">SPOTIFY · EVERY PHONE · THE SAME MILLISECOND</text>
 
-  <!-- ============ measured facts, as a spec strip ============ -->
+  <!-- ====== spec strip ====== -->
   <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
     <g transform="translate(78 370)">
       <text fill="#3ef2a0" font-size="15" letter-spacing="0.5">0.00 ms</text>
       <text y="18" fill="#56526a" font-size="10.5" letter-spacing="1.8">STEADY-STATE DRIFT</text>
     </g>
     <g transform="translate(296 370)">
-      <text fill="#3ef2a0" font-size="15" letter-spacing="0.5">±0.5 ms</text>
-      <text y="18" fill="#56526a" font-size="10.5" letter-spacing="1.8">CLOCK SPREAD</text>
+      <text fill="#3ef2a0" font-size="15" letter-spacing="0.5">48 kHz</text>
+      <text y="18" fill="#56526a" font-size="10.5" letter-spacing="1.8">OPUS · 20 MS FRAMES</text>
     </g>
-    <g transform="translate(468 370)">
-      <text fill="#3ef2a0" font-size="15" letter-spacing="0.5">20 ms</text>
-      <text y="18" fill="#56526a" font-size="10.5" letter-spacing="1.8">OPUS FRAMES</text>
+    <g transform="translate(490 370)">
+      <text fill="#3ef2a0" font-size="15" letter-spacing="0.5">Rust</text>
+      <text y="18" fill="#56526a" font-size="10.5" letter-spacing="1.8">CLOUD SOURCE</text>
     </g>
-    <g transform="translate(626 370)">
-      <text fill="#3ef2a0" font-size="15" letter-spacing="0.5">0</text>
-      <text y="18" fill="#56526a" font-size="10.5" letter-spacing="1.8">LATE IN 11,980</text>
+    <g transform="translate(640 370)">
+      <text fill="#3ef2a0" font-size="15" letter-spacing="0.5">yours</text>
+      <text y="18" fill="#56526a" font-size="10.5" letter-spacing="1.8">SELF-HOSTED · CLOUDFLARE</text>
     </g>
   </g>
 

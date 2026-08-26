@@ -465,7 +465,7 @@ const F64_BASE = 64;
 const STATS_POLL_MS = 250;
 
 /**
- * Live playback: a continuous stream from a Downbeat CLI instead of a file.
+ * Live playback: a continuous stream from the cloud source instead of a file.
  *
  * Each packet arrives already carrying the instant it must be heard, computed
  * by the source from its own capture anchor. A receiver therefore never infers

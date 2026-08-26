@@ -13,7 +13,7 @@ export const PROTOCOL_VERSION = 1;
 export const CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 export const CODE_LENGTH = 6;
 
-/** `source` is a Downbeat CLI feeding live audio into the room. */
+/** `source` is the cloud player feeding live audio into the room. */
 export type Role = "host" | "listener" | "source";
 
 export interface Track {
@@ -87,7 +87,7 @@ export interface LiveState {
    * Identifies one run of the source across reconnects. A re-announce with
    * the same epoch means "the stream you are playing", so a listener that
    * never noticed the outage keeps playing without a restart; a new epoch is
-   * a restarted CLI with a fresh sample timeline, which requires one.
+   * a restarted source with a fresh sample timeline, which requires one.
    */
   epoch?: number;
 }

@@ -1,22 +1,28 @@
 import { useCallback, useEffect, useState } from "react";
 import { Landing } from "./screens/Landing";
 import { Room } from "./screens/Room";
+import { Host } from "./screens/Host";
 import { isValidCode, normalizeCode } from "../shared/code";
 import { watchForNewBuild } from "./lib/version";
 
-/** Room URLs are `/r/CODE`; everything else is the landing screen. */
-function readPath(): string | null {
+type Route = { screen: "landing" } | { screen: "host" } | { screen: "room"; code: string };
+
+/** `/host` is the console, `/r/CODE` a room; everything else is the door. */
+function readPath(): Route {
+  if (location.pathname === "/host") return { screen: "host" };
   const m = /^\/r\/([^/]+)/.exec(location.pathname);
-  if (!m) return null;
-  const code = normalizeCode(decodeURIComponent(m[1]));
-  return isValidCode(code) ? code : null;
+  if (m) {
+    const code = normalizeCode(decodeURIComponent(m[1]));
+    if (isValidCode(code)) return { screen: "room", code };
+  }
+  return { screen: "landing" };
 }
 
 export function App() {
-  const [code, setCode] = useState<string | null>(readPath);
+  const [route, setRoute] = useState<Route>(readPath);
 
   useEffect(() => {
-    const onPop = () => setCode(readPath());
+    const onPop = () => setRoute(readPath());
     addEventListener("popstate", onPop);
     return () => removeEventListener("popstate", onPop);
   }, []);
@@ -25,14 +31,14 @@ export function App() {
   // more obvious fault than the stale code it is fixing.
   useEffect(() => watchForNewBuild(() => document.body.dataset.playing === "1"), []);
 
-  const enter = useCallback((next: string, token: string | null) => {
-    if (token) sessionStorage.setItem(`downbeat.host.${next}`, token);
+  const enter = useCallback((next: string) => {
     history.pushState(null, "", `/r/${next}`);
-    setCode(next);
+    setRoute({ screen: "room", code: next });
   }, []);
 
-  if (!code) return <Landing onEnter={enter} />;
+  if (route.screen === "host") return <Host />;
+  if (route.screen === "landing") return <Landing onEnter={enter} />;
 
-  const hostToken = sessionStorage.getItem(`downbeat.host.${code}`);
-  return <Room key={code} code={code} hostToken={hostToken} />;
+  const hostToken = sessionStorage.getItem(`downbeat.host.${route.code}`);
+  return <Room key={route.code} code={route.code} hostToken={hostToken} />;
 }
