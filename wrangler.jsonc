@@ -7,7 +7,13 @@
   "assets": {
     "directory": "./dist/client",
     "binding": "ASSETS",
-    "not_found_handling": "single-page-application"
+    "not_found_handling": "single-page-application",
+    // Without this, the asset layer answers top-level NAVIGATIONS to these
+    // paths with the SPA before the Worker ever runs. API fetches were never
+    // affected — but the Spotify OAuth callback is a navigation, and it was
+    // being swallowed whole (the browser landed on the landing page with the
+    // authorization code still in the URL, exchanged with nobody).
+    "run_worker_first": ["/api/*", "/audio/*"]
   },
   "durable_objects": {
     "bindings": [
