@@ -633,7 +633,15 @@ function telemetryStats({ status, config, phase }: BodyProps): Stat[] {
     { label: "BITRATE", value: status ? `${num(status.kbits, 3)} kbit/s` : "—" },
     { label: "PACKETS", value: status ? group(status.packets) : "—" },
     { label: "CAPTURED", value: status ? `${num(status.capturedSec, 5, 1)} s` : "—" },
-    { label: "BUFFER", value: config ? `${config.bufferMs} ms` : "—", color: C.muted },
+    {
+      label: "BUFFER",
+      value: status?.bufferMs !== undefined
+        ? `${Math.round(status.bufferMs)} ms`
+        : config
+          ? `${config.bufferMs} ms`
+          : "—",
+      color: C.muted,
+    },
     {
       label: "UNDERRUN",
       value: status ? group(status.starved) : "—",

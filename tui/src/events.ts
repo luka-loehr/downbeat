@@ -49,6 +49,8 @@ export interface StatusEvent {
   kbits: number;
   clockMs: number;
   synced: boolean;
+  /** The adaptive delay budget as it currently stands, ms. */
+  bufferMs?: number;
   starved: number;
   reanchors: number;
   listeners: number;

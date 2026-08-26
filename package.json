@@ -1,6 +1,6 @@
 {
   "name": "downbeat",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Millisecond-exact multi-device music synchronisation over the web.",

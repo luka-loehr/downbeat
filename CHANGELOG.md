@@ -3,6 +3,34 @@
 All notable changes to this project, with the conditions under which each
 measurement was taken.
 
+## [0.3.0] — 2026-08-26
+
+The delay budget steers itself, and every device follows the source's real
+timeline instead of a first impression of it.
+
+### Added
+- **An adaptive delay budget.** Every listener now reports how far ahead of
+  its deadline packets arrive and whether its ring ever ran dry; the host
+  trims the budget while the weakest listener still has ~300 ms in hand
+  (2 ms/s — inside every drift controller's inaudible band) and grows it an
+  order of magnitude faster the moment anyone struggles. `--buffer` is now
+  the starting value, `--min-buffer` the floor (default 350 ms), `--no-adapt`
+  pins it. The terminal shows the budget moving.
+- Listeners follow the stamped timeline, not the anchor line. A device used
+  to extrapolate its first packet at exactly nominal rate forever, so the
+  stamps — which move when the budget adapts and as the timeline is
+  disciplined to the capture crystal — walked away from it (~36 ms per hour
+  per 10 ppm, and the whole point of adaptation would never have reached the
+  ring). The residual is slewed into the sync target at ≤7.5 ms/s; a
+  dislocation past 500 ms re-anchors once instead of slewing for minutes.
+
+### Fixed
+- Only a verified source socket may inject binary audio into a room; any
+  listener could previously stream into the relay path.
+- Browser reconnects are jittered so a room full of phones dropped by one
+  outage does not stampede back in a single synchronised wave, and a
+  WebSocket constructor that throws no longer ends the retry chain.
+
 ## [0.2.2] — 2026-08-26
 
 Reconnection that actually reconnects, on every side of the wire.

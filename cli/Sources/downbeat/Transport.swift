@@ -63,6 +63,12 @@ final class Transport: NSObject, @unchecked Sendable {
     }
     var onMembers: (@Sendable (MemberSnapshot) -> Void)?
 
+    /// Smallest live-arrival margin any listener reports, ms. NaN = nobody is
+    /// reporting one yet. This is the adaptive delay budget's steering signal.
+    private(set) var minListenerMarginMs = Double.nan
+    /// Sum of the cumulative underrun counts across listeners.
+    private(set) var totalListenerUnderruns = 0
+
     init(baseURL: URL, clock: RoomClock) {
         self.baseURL = baseURL
         self.clock = clock
@@ -290,6 +296,11 @@ final class Transport: NSObject, @unchecked Sendable {
             if playouts.count > 1, let lo = playouts.min(), let hi = playouts.max() {
                 spread = hi - lo
             }
+            let margins = speakers.compactMap { $0["marginMs"] as? Double }
+            minListenerMarginMs = margins.min() ?? .nan
+            totalListenerUnderruns = speakers
+                .compactMap { $0["underruns"] as? Double }
+                .reduce(0) { $0 + Int($1) }
             let encoded = (try? JSONSerialization.data(withJSONObject: speakers))
                 .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
             onMembers?(MemberSnapshot(count: speakers.count, spreadMs: spread, json: encoded))

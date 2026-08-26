@@ -50,6 +50,15 @@ export interface Member {
    * inter-device sync error, and it is what the host displays.
    */
   playoutMs: number | null;
+  /**
+   * Live-stream arrival margin in ms -- how far ahead of their deadline this
+   * member's packets are landing. Null while not playing live. This is the
+   * signal the source's adaptive delay budget steers by: the smallest margin
+   * in the room says how much cushion is actually spare.
+   */
+  marginMs?: number | null;
+  /** Cumulative output frames this member's live ring could not fill. */
+  underruns?: number | null;
 }
 
 /** `arming` = everyone is buffering; `scheduled` = deadline set, waiting for it. */
@@ -106,6 +115,8 @@ export type ClientMessage =
       sync: number;
       startError: number | null;
       playoutMs?: number | null;
+      marginMs?: number | null;
+      underruns?: number | null;
     }
   | { t: "cmd"; cmd: HostCommand };
 

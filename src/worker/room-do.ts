@@ -32,6 +32,8 @@ interface Attach {
   readyFor: string | null;
   startError: number | null;
   playoutMs: number | null;
+  marginMs: number | null;
+  underruns: number | null;
 }
 
 const EMPTY: Persisted = {
@@ -109,6 +111,8 @@ export class RoomDO implements DurableObject {
       readyFor: null,
       startError: null,
       playoutMs: null,
+      marginMs: null,
+      underruns: null,
     };
     server.serializeAttachment(attach);
 
@@ -139,6 +143,10 @@ export class RoomDO implements DurableObject {
     // Live audio: forward untouched to every listener. No parsing, no state,
     // no persistence -- this path runs 50 times a second and must stay cheap.
     if (typeof raw !== "string") {
+      // Only a verified source may inject audio. The tag was assigned at
+      // accept time, after the Worker checked the host token -- without this,
+      // any listener could stream into the room.
+      if (!this.ctx.getTags(ws).includes("tx")) return;
       for (const peer of this.ctx.getWebSockets("rx")) {
         try {
           peer.send(raw);
@@ -170,6 +178,8 @@ export class RoomDO implements DurableObject {
         a.sync = msg.sync;
         a.startError = msg.startError;
         a.playoutMs = msg.playoutMs ?? null;
+        a.marginMs = msg.marginMs ?? null;
+        a.underruns = msg.underruns ?? null;
         ws.serializeAttachment(a);
         this.broadcastStateSoon();
         return;

@@ -40,7 +40,13 @@ final class LocalPlayer {
     private let clock: RoomClock
     private let sampleRate: Double
     private let channels: Int
-    private let bufferMs: Double
+    /**
+     Delay between capture and playout, ms. The adaptive budget rewrites it at
+     runtime, slewed slowly enough that the PI controller below simply tracks
+     the move -- read from the realtime IO proc, written from the status loop,
+     atomic-width like `gain`.
+     */
+    nonisolated(unsafe) var bufferMs: Double
 
     private var deviceID = AudioObjectID(kAudioObjectUnknown)
     private var procID: AudioDeviceIOProcID?
@@ -132,7 +138,6 @@ final class LocalPlayer {
 
         let rate = sampleRate
         let chans = channels
-        let delay = bufferMs
         let ioStatus = AudioDeviceCreateIOProcIDWithBlock(&procID, deviceID, nil) {
             [weak self] _, _, _, outOutputData, inOutputTime in
             guard let self else { return }
@@ -153,7 +158,7 @@ final class LocalPlayer {
             // When will these samples actually be heard? Local domain on both
             // sides, so the room-clock offset cancels out entirely.
             let outLocalMs = RoomClock.localMs(hostTime: inOutputTime.pointee.mHostTime)
-            let want = (outLocalMs - delay - self.anchorLocalMs - self.correctionMs) / 1000 * rate
+            let want = (outLocalMs - self.bufferMs - self.anchorLocalMs - self.correctionMs) / 1000 * rate
 
             if !self.reading {
                 self.readPos = want

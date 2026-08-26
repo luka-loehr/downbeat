@@ -143,7 +143,9 @@ Useful flags:
 | flag | effect |
 | --- | --- |
 | `--code PARTY7` | claim a fixed room code instead of a random one |
-| `--buffer 3000` | raise the delay budget on a weak network (default 2000 ms) |
+| `--buffer 3000` | starting delay budget (default 2000 ms); the host then adapts it toward the smallest value the room's listeners can carry |
+| `--min-buffer 500` | the adaptive budget's floor (default 350 ms) |
+| `--no-adapt` | pin the budget at `--buffer` |
 | `--source system` | capture everything the Mac plays, not just Spotify |
 | `--takeover` | take a room already held by another session |
 | `--no-mute` | leave the source audible locally |

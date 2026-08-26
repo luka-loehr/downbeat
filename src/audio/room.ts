@@ -139,7 +139,15 @@ export class RoomConnection {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const params = new URLSearchParams({ code: this.code, name: this.name });
     if (this.hostToken) params.set("hostToken", this.hostToken);
-    const ws = new WebSocket(`${proto}://${location.host}/api/ws?${params}`);
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(`${proto}://${location.host}/api/ws?${params}`);
+    } catch {
+      // A constructor that throws (a browser in a weird network state) must
+      // not end the retry chain -- this has to recover unattended.
+      this.scheduleReconnect();
+      return;
+    }
     // Live audio arrives as binary frames, not text.
     ws.binaryType = "arraybuffer";
     this.ws = ws;
@@ -196,7 +204,11 @@ export class RoomConnection {
     if (this.reconnectTimer !== null) return;
     // Backoff, but never past a few seconds: this has to recover on its own
     // while the phone is in someone's pocket, with nobody there to retry.
-    const delay = Math.min(RECONNECT_BASE_MS * 2 ** this.attempt, RECONNECT_MAX_MS);
+    // Jittered, so a room full of phones dropped by the same outage does not
+    // stampede back through the door in one synchronised wave.
+    const delay =
+      Math.min(RECONNECT_BASE_MS * 2 ** this.attempt, RECONNECT_MAX_MS) *
+      (0.5 + Math.random() * 0.5);
     this.attempt++;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -392,6 +404,11 @@ export class RoomConnection {
       return;
     }
     const stats = this.clock.stats();
+    const live = this.live?.running ? this.live.getStats() : null;
+    // Margin only once the stream is genuinely flowing: the EMA starts at
+    // zero, and reporting that during the opening seconds would read as an
+    // emergency to the source's adaptive delay budget.
+    const settled = live !== null && live.decoded > 100;
     this.send({
       t: "telemetry",
       rtt: Math.round(stats.rtt),
@@ -402,6 +419,8 @@ export class RoomConnection {
       playoutMs: this.live?.running
         ? Math.round(this.live.playoutMs * 10) / 10
         : null,
+      marginMs: settled ? Math.round(live.marginMs) : null,
+      underruns: settled ? live.underruns : null,
     });
   }
 

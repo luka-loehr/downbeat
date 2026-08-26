@@ -42,7 +42,7 @@ if (!core) {
 /** Subcommands that are plain, interactive, or both -- run them as themselves. */
 const PASSTHROUGH = new Set(["login", "logout", "selftest", "selftest-qr"]);
 
-const VERSION = "0.2.2";
+const VERSION = "0.3.0";
 
 const HELP = `
   \x1b[1mdownbeat\x1b[0m — one song, every phone, the same millisecond
@@ -59,7 +59,11 @@ const HELP = `
                                  6 chars from 0-9 A-Z; O, I and L are read
                                  as 0, 1 and 1, and U is not used
     --takeover                   take over a room already being hosted
-    --buffer <ms>                delay before playback (default 2000)
+    --buffer <ms>                starting delay budget (default 2000); the
+                                 host then adapts it toward the smallest
+                                 value the room's listeners can carry
+    --min-buffer <ms>            the adaptive budget's floor (default 350)
+    --no-adapt                   pin the budget at --buffer
     --source <app|system|pid>    app name (Spotify, Music, …), "system"
                                  for everything, or a process id
     --no-mute                    do NOT mute the source locally

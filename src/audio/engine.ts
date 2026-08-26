@@ -592,6 +592,17 @@ export class LivePlayer {
   /** The anchor packet, so the wanted position can be derived at any instant. */
   private anchorPlayAt = 0;
   private anchorSample = 0;
+  /**
+   * Slewed drift of the stamped timeline against the anchor line, ms.
+   *
+   * The anchor line extrapolates the first packet at exactly nominal rate,
+   * but the stamps move: the source slews its delay budget at runtime and
+   * disciplines its timeline to the capture crystal's real progress -- which
+   * alone walks ~36 ms per hour per 10 ppm away from the nominal line.
+   * Following the stamps, slewed, is what keeps every device on the source's
+   * real timeline for as long as the stream runs.
+   */
+  private timelineDriftMs = 0;
   /** Steering error reported back by the worklet, ms. */
   private anchorErrorMs = 0;
   private appliedRate = 1;
@@ -752,7 +763,26 @@ export class LivePlayer {
       this.frameOffset = wanted - sampleIndex;
       this.anchorPlayAt = playAt;
       this.anchorSample = sampleIndex;
+      this.timelineDriftMs = 0;
       this.anchored = true;
+    } else if (this.config) {
+      const line =
+        this.anchorPlayAt +
+        ((sampleIndex - this.anchorSample) / this.config.sampleRate) * 1000;
+      const residual = playAt - line;
+      if (Math.abs(residual - this.timelineDriftMs) > 500) {
+        // The timeline itself dislocated -- a source suspend, a clock step.
+        // Re-anchor on this packet rather than slewing for minutes; the
+        // worklet notices the target jump and hard-resyncs once.
+        this.frameOffset = wanted - sampleIndex;
+        this.anchorPlayAt = playAt;
+        this.anchorSample = sampleIndex;
+        this.timelineDriftMs = 0;
+      } else {
+        // 0.15 ms per packet is 7.5 ms/s -- comfortably above everything the
+        // source is allowed to do to the stamps, yet far below audibility.
+        this.timelineDriftMs += clamp(residual - this.timelineDriftMs, -0.15, 0.15);
+      }
     }
 
     // Tell the worklet where its read head should be. It steers itself from
@@ -782,7 +812,8 @@ export class LivePlayer {
     // Room time at which the sample now leaving the graph will be heard.
     const heardNowMs = (now - this.k) * 1000;
     const wantedSample =
-      this.anchorSample + ((heardNowMs - this.anchorPlayAt) / 1000) * rate;
+      this.anchorSample +
+      ((heardNowMs - this.anchorPlayAt - this.timelineDriftMs) / 1000) * rate;
 
     node.port.postMessage({
       type: "sync",

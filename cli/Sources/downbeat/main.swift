@@ -19,6 +19,10 @@ struct Options {
     var pid: pid_t?          // nil = whole system
     var sourceLabel = "Spotify"
     var bufferMs: Double = 2000
+    /// Floor for the adaptive delay budget; the pipeline needs ~150 ms.
+    var minBufferMs: Double = 350
+    /// Adapt the budget at runtime from listener telemetry.
+    var adapt = true
     var mute = true
     var playLocally = true
     var passphrase = ProcessInfo.processInfo.environment["DOWNBEAT_PASSPHRASE"] ?? ""
@@ -53,6 +57,10 @@ func parseOptions() -> Options {
         case "--buffer":
             i += 1
             if i < args.count, let ms = Double(args[i]) { o.bufferMs = ms }
+        case "--min-buffer":
+            i += 1
+            if i < args.count, let ms = Double(args[i]) { o.minBufferMs = max(150, ms) }
+        case "--no-adapt": o.adapt = false
         case "--passphrase":
             i += 1
             if i < args.count { o.passphrase = args[i] }
@@ -75,7 +83,11 @@ func parseOptions() -> Options {
 
               --source <app|system|pid>  app name (Spotify, Music, …),
                                          "system" for everything, or a pid
-              --buffer <ms>              delay before playback, default 2000
+              --buffer <ms>              starting delay budget, default 2000 —
+                                         adapts at runtime toward the smallest
+                                         value the room's listeners can carry
+              --min-buffer <ms>          the adaptive budget's floor (350)
+              --no-adapt                 pin the budget at --buffer
               --code <ABC123>            fixed room code instead of random
               --takeover                 take over a room already hosted
               --passphrase <word>        pass it directly instead of the store
@@ -189,6 +201,19 @@ if !options.offline && passphrase.isEmpty {
 let clock = RoomClock()
 nonisolated(unsafe) let tap = ProcessTap()
 let ring = RingBuffer(seconds: max(8, options.bufferMs / 1000 * 3), sampleRate: 48000, channels: 2)
+
+/**
+ The delay budget, live. Starts at `--buffer` and is then steered by the
+ status loop from listener telemetry: trimmed while every listener shows
+ spare margin, grown the moment one of them is struggling. Read by the
+ encoder (into every packet's play instant) and mirrored into the local
+ player, so this Mac and the phones move together. All movement is slewed
+ gently enough that the drift controllers on every device just track it.
+ */
+let adaptiveBufferMs = Atomic<UInt64>(options.bufferMs.bitPattern)
+/// The budget's rails. An explicit --buffer above 2000 raises the ceiling.
+let minBufferMs = min(options.minBufferMs, options.bufferMs)
+let maxBufferMs = max(2000, options.bufferMs)
 
 final class Stats: @unchecked Sendable {
     var peak: Float = 0
@@ -374,7 +399,6 @@ if let t = transport {
     // The encoder is owned solely by the thread below; nothing else touches it.
     nonisolated(unsafe) let ownedEncoder = encoder
     let frameSize = encoder.framesPerPacket
-    let buffer = options.bufferMs
     // The room clock corrects itself in steps of up to 4 ms. Reading it directly
     // per packet would stamp that step straight into the stream timeline, and a
     // 4 ms step between two 20 ms packets is a 4 ms hole -- an audible click on
@@ -408,6 +432,7 @@ if let t = transport {
                 let captureRoomMs = anchorLocalMs
                     + Double(encoded) / rate * 1000
                     + streamOffset
+                let buffer = Double(bitPattern: adaptiveBufferMs.load(ordering: .relaxed))
                 t.sendPacket(packet, playAtRoomMs: captureRoomMs + buffer, sampleIndex: encoded)
                 stats.lock.lock()
                 stats.sent += 1
@@ -562,8 +587,43 @@ if options.json {
 
 let started = RoomClock.localNow()
 let statusInterval = options.json ? 0.2 : 1.0
+/// Aim to keep the weakest listener this far ahead of its deadline.
+let safeMarginMs = 300.0
+/// Trim gently -- 2 ms/s is inside every drift controller's inaudible band --
+/// but grow an order of magnitude faster: cushion during trouble cannot wait.
+let trimMsPerSecond = 2.0
+let growMsPerSecond = 25.0
+var lastUnderrunTotal = 0
 while true {
     Thread.sleep(forTimeInterval: statusInterval)
+
+    // ---- adaptive delay budget -------------------------------------------
+    //
+    // Each listener reports how far ahead of its deadline packets arrive and
+    // how many output frames its ring failed to fill. The budget chases the
+    // smallest value that still leaves the weakest listener `safeMarginMs` in
+    // hand; an underrun anywhere is an immediate demand for more cushion.
+    if options.adapt, let t = transport {
+        let current = Double(bitPattern: adaptiveBufferMs.load(ordering: .relaxed))
+        let margin = t.minListenerMarginMs
+        if !margin.isNaN {
+            var target = current + (safeMarginMs - margin)
+            let underruns = t.totalListenerUnderruns
+            if underruns > lastUnderrunTotal { target = max(target, current + 400) }
+            lastUnderrunTotal = underruns
+            target = min(max(target, minBufferMs), maxBufferMs)
+            let delta = target - current
+            // The deadband keeps measurement noise from rocking the budget.
+            if abs(delta) > 40 {
+                let rate = delta > 0 ? growMsPerSecond : trimMsPerSecond
+                let step = min(abs(delta), rate * statusInterval)
+                let next = current + (delta > 0 ? step : -step)
+                adaptiveBufferMs.store(next.bitPattern, ordering: .relaxed)
+                player?.bufferMs = next
+            }
+        }
+    }
+
     stats.lock.lock()
     let peak = stats.peak, captured = stats.captured, sent = stats.sent, bytes = stats.bytes
     let levels = stats.levels
@@ -585,6 +645,7 @@ while true {
             "kbits": kbits,
             "clockMs": clock.uncertainty,
             "synced": clock.isSynced,
+            "bufferMs": Double(bitPattern: adaptiveBufferMs.load(ordering: .relaxed)),
             "starved": player?.starvedFrames ?? 0,
             "reanchors": player?.reanchors ?? 0,
             "listeners": listenerCount.load(ordering: .relaxed),
@@ -605,7 +666,8 @@ while true {
         let db = peak > 0 ? String(format: "%6.1f dBFS", peakDb) : "  -inf dBFS"
         let sync = transport == nil ? "offline"
             : (clock.isSynced ? String(format: "±%.1fms", clock.uncertainty) : "sync…")
-        print(String(format: "  %@  captured %5.1fs  packets %5d  %5.0f kbit/s  clock %@  starved %d",
-                     db, Double(captured) / rate, sent, kbits, sync, player?.starvedFrames ?? 0))
+        let buf = Double(bitPattern: adaptiveBufferMs.load(ordering: .relaxed))
+        print(String(format: "  %@  captured %5.1fs  packets %5d  %5.0f kbit/s  clock %@  buffer %4.0fms  starved %d",
+                     db, Double(captured) / rate, sent, kbits, sync, buf, player?.starvedFrames ?? 0))
     }
 }
