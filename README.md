@@ -2,8 +2,8 @@
 
 [![Worker](https://img.shields.io/badge/Cloudflare-Workers%20·%20Durable%20Objects%20·%20Containers-F38020?style=flat&logo=cloudflare&logoColor=white)](https://developers.cloudflare.com/containers/)
 [![Source](https://img.shields.io/badge/source-Rust%20·%20librespot%20·%20Spotify%20Connect-CE422B?style=flat&logo=rust&logoColor=white)](source/)
-[![Codec](https://img.shields.io/badge/audio-Opus%2020%20ms%20·%2048%20kHz-3ef2a0?style=flat)](#6-how-the-synchronisation-works)
-[![Drift](https://img.shields.io/badge/steady--state%20drift-0.00%20ms-3ef2a0?style=flat)](#6-how-the-synchronisation-works)
+[![Codec](https://img.shields.io/badge/audio-Opus%2020%20ms%20·%2048%20kHz-3ef2a0?style=flat)](#7-how-the-synchronisation-works)
+[![Drift](https://img.shields.io/badge/steady--state%20drift-0.00%20ms-3ef2a0?style=flat)](#7-how-the-synchronisation-works)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat)](LICENSE)
 
 **Play Spotify on every phone in the room, on the same millisecond.**
@@ -18,14 +18,39 @@ No app, no account for guests, no computer running at the party. The host's
 "hardware" is a Rust process in a Cloudflare container; the host's console is
 a web page; the guests' player is a browser tab.
 
-Spotify's own group session drifts by roughly a second between devices,
-because it streams at playback time and every device buffers differently.
-Downbeat inverts that: audio arrives on every phone well **before** its
-deadline, and what the network delivers late has already been played from a
-buffer that never ran dry. All that has to agree across the room is a clock —
-and clocks can be made to agree to a fraction of a millisecond.
+## 1. Isn't this just a Spotify Jam?
 
-## 1. A night, from the host's side
+A Jam is the feature everyone reaches for, and as a shared queue it's fine.
+But it has one structural gap: **the devices don't play together.** A Jam
+plays on one output, and when guests "listen along" on their own devices,
+each phone streams and buffers independently — playback lands up to a second
+apart, one phone echoing the next. Laying five phones around a room and
+getting one big speaker out of them is precisely the thing a Jam cannot do,
+because it streams at playback time and hopes; nothing in it ever makes two
+devices agree on *when*.
+
+And before the first note, there's the joining itself: proximity pairing —
+Bluetooth device discovery that finds the session at one party and silently
+doesn't at the next, guests waving phones at each other while someone
+re-shares the invite link.
+
+Downbeat is built for exactly that gap:
+
+| | Spotify Jam | Downbeat |
+| --- | --- | --- |
+| Shared control of the music | ✓ | ✓ — you keep using Spotify itself |
+| Every phone actually plays | listen-along, up to ~1 s apart | ✓ — the entire point |
+| Devices in sync | never promised, audibly not | millisecond-locked, and it holds for hours |
+| Joining | proximity pairing, works when it feels like it | a QR code and a six-letter room code — a URL, so it works every single time |
+| Guests need | the Spotify app + an account (Premium to listen along) | a browser tab |
+
+The inversion that makes it work: audio arrives on every phone well
+**before** its deadline, so what the network delivers late has already been
+played from a buffer that never ran dry. All that has to agree across the
+room is a clock — and clocks can be made to agree to a fraction of a
+millisecond ([§7](#7-how-the-synchronisation-works)).
+
+## 2. A night, from the host's side
 
 1. Open `https://your-deployment/host`, unlock with your passphrase.
 2. **Connect Spotify** — once, ever. The connection survives restarts.
@@ -39,7 +64,7 @@ gesture), and are in sync. The console shows every connected device live:
 round-trip time, clock confidence, buffer health, and the actual inter-device
 spread in milliseconds.
 
-## 2. Architecture
+## 3. Architecture
 
 ```text
       your Spotify app (phone, laptop, anywhere)
@@ -81,7 +106,7 @@ spread in milliseconds.
 | `src/ui/` | the door, the room, the host console |
 | `migrations/` | D1 schema |
 
-## 3. Deploy your own
+## 4. Deploy your own
 
 Downbeat is not a hosted service and has no central anything. Each deployment
 is one person's: your Cloudflare account, your Spotify account, your rooms.
@@ -89,7 +114,7 @@ is one person's: your Cloudflare account, your Spotify account, your rooms.
 **You need:**
 
 - A **Cloudflare account** on the [Workers Paid plan](https://developers.cloudflare.com/workers/platform/pricing/)
-  ($5/month — Containers require it; see [§4](#4-what-it-costs) for what the
+  ($5/month — Containers require it; see [§5](#5-what-it-costs) for what the
   free plan can and cannot do).
 - A **Spotify Premium** account (Spotify Connect refuses to play on free
   accounts).
@@ -123,7 +148,7 @@ to your GitHub repository's Actions secrets.
 > `TOKEN_KEY` (32 random bytes, base64 — encrypts the stored Spotify refresh
 > token so a leaked database hands out nothing usable).
 
-## 4. What it costs
+## 5. What it costs
 
 | | **Free plan** | **Workers Paid — $5/month** |
 | --- | --- | --- |
@@ -143,7 +168,7 @@ container scales to zero when you stop it (or when the room dies), and the
 supervisor refuses to restart a container whose credentials have expired, so
 nothing idles on your bill.
 
-## 5. Security & legal shape
+## 6. Security & legal shape
 
 - **Single operator, by design.** Only the person holding `HOST_PASSPHRASE`
   can connect a Spotify account — this is not, and is deliberately not
@@ -163,7 +188,7 @@ nothing idles on your bill.
   it is built for your own living room, and the licenses on your account
   reach exactly that far.
 
-## 6. How the synchronisation works
+## 7. How the synchronisation works
 
 **The clock.** Each client — and the source container, running the same
 algorithm in Rust — probes the Durable Object over its WebSocket: send `t0`,
@@ -205,7 +230,7 @@ value the room's weakest listener can carry — growing immediately when anyone
 gets close to the edge, shrinking by slow creep when the whole room has slack,
 and slewing every adjustment so no packet ever jumps.
 
-## 7. What this deliberately does not do
+## 8. What this deliberately does not do
 
 - **No Web Playback SDK, no API streaming.** Spotify's Web API caps new apps
   at five users in dev mode — irrelevant here, because exactly one user (you)
@@ -222,7 +247,7 @@ and slewing every adjustment so no packet ever jumps.
   two speakers three metres apart are ~9 ms apart at your ear no matter what
   software does. Downbeat removes the software error; the room is the room.
 
-## 8. Working on it
+## 9. Working on it
 
 ```bash
 npm run typecheck        # worker + web
@@ -238,7 +263,7 @@ Local Worker development: `npx wrangler dev` (containers run locally through
 Docker). CI typechecks, tests and builds both halves on every push; pushes to
 `main` deploy.
 
-## 9. License
+## 10. License
 
 [MIT](LICENSE). Downbeat carries audio your own accounts and devices are
 already entitled to play, to speakers in the same room. What you point it at
