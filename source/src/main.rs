@@ -27,7 +27,7 @@ mod clock;
 use anyhow::{anyhow, Context, Result};
 use clock::RoomClock;
 use futures_util::{SinkExt, StreamExt};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -102,12 +102,23 @@ impl Config {
     }
 }
 
-/// What `/` on the health port reports. Cloudflare Containers use the open
-/// port as the readiness signal; the dashboard reads the body.
+/// What `/` on the health port reports — and what the stats heartbeat logs.
+/// Cloudflare Containers use the open port as the readiness signal; the
+/// dashboard reads the body. Everything here is written with relaxed atomics
+/// from the packet loop, so keeping it fresh costs nothing measurable.
 struct Status {
     spotify: Mutex<String>,
     room: Mutex<String>,
     packets: AtomicU64,
+    /// The delay budget actually applied to stamps, and where it is heading.
+    budget_us: AtomicI64,
+    budget_target_us: AtomicI64,
+    /// Room-clock estimate: applied offset and the spread of believed probes.
+    offset_us: AtomicI64,
+    uncertainty_us: AtomicI64,
+    min_rtt_us: AtomicI64,
+    /// The worst ring cushion any member last reported; i64::MIN = none yet.
+    worst_cushion_us: AtomicI64,
     started: std::time::Instant,
 }
 
@@ -117,6 +128,12 @@ impl Status {
             spotify: Mutex::new("starting".into()),
             room: Mutex::new("connecting".into()),
             packets: AtomicU64::new(0),
+            budget_us: AtomicI64::new(0),
+            budget_target_us: AtomicI64::new(0),
+            offset_us: AtomicI64::new(0),
+            uncertainty_us: AtomicI64::new(0),
+            min_rtt_us: AtomicI64::new(0),
+            worst_cushion_us: AtomicI64::new(i64::MIN),
             started: std::time::Instant::now(),
         })
     }
@@ -126,14 +143,57 @@ impl Status {
     fn set_room(&self, s: &str) {
         *self.room.lock().unwrap() = s.into();
     }
+    fn ms(v: &AtomicI64) -> f64 {
+        v.load(Ordering::Relaxed) as f64 / 1000.0
+    }
     fn json(&self) -> String {
+        let cushion = self.worst_cushion_us.load(Ordering::Relaxed);
         serde_json::json!({
             "spotify": *self.spotify.lock().unwrap(),
             "room": *self.room.lock().unwrap(),
             "packets": self.packets.load(Ordering::Relaxed),
+            "budgetMs": Self::ms(&self.budget_us),
+            "budgetTargetMs": Self::ms(&self.budget_target_us),
+            "offsetMs": Self::ms(&self.offset_us),
+            "uncertaintyMs": Self::ms(&self.uncertainty_us),
+            "minRttMs": Self::ms(&self.min_rtt_us),
+            "worstCushionMs": if cushion == i64::MIN {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(cushion as f64 / 1000.0)
+            },
             "uptimeSec": self.started.elapsed().as_secs(),
         })
         .to_string()
+    }
+}
+
+/// The stats heartbeat: one structured line every ten seconds, so any
+/// stutter's context — budget, cushion, clock quality, packet rate — is on
+/// record BEFORE anyone asks. Silence in between; events carry the anomalies.
+async fn log_stats(status: Arc<Status>) {
+    let mut last_packets = 0u64;
+    loop {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let packets = status.packets.load(Ordering::Relaxed);
+        // Only while streaming: an idle source has nothing to say.
+        if packets == last_packets {
+            continue;
+        }
+        let cushion = status.worst_cushion_us.load(Ordering::Relaxed);
+        tracing::info!(
+            evt = "stats",
+            pps = (packets - last_packets) as f64 / 10.0,
+            packets,
+            budget_ms = Status::ms(&status.budget_us),
+            budget_target_ms = Status::ms(&status.budget_target_us),
+            offset_ms = Status::ms(&status.offset_us),
+            uncertainty_ms = Status::ms(&status.uncertainty_us),
+            min_rtt_ms = Status::ms(&status.min_rtt_us),
+            worst_cushion_ms = if cushion == i64::MIN { f64::NAN } else { cushion as f64 / 1000.0 },
+            "stream stats"
+        );
+        last_packets = packets;
     }
 }
 
@@ -203,6 +263,7 @@ async fn main() -> Result<()> {
         .expect("install rustls crypto provider");
 
     tracing_subscriber::fmt()
+        .json()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info".into()),
@@ -214,6 +275,7 @@ async fn main() -> Result<()> {
     tracing::info!(room = %config.room_code, "downbeat-source starting");
 
     tokio::spawn(serve_health(config.port, status.clone()));
+    tokio::spawn(log_stats(status.clone()));
 
     // One run of this process = one epoch. Listeners treat a re-announce with
     // the same epoch as "the stream you are already playing", so websocket
@@ -494,11 +556,25 @@ async fn run_stream(
                             if let Some((t0, t1)) = parse_pong(&text) {
                                 clock.lock().unwrap().on_pong(t0, t1);
                             } else if let Some(worst) = parse_worst_cushion(&text) {
+                                status.worst_cushion_us
+                                    .store((worst * 1000.0) as i64, Ordering::Relaxed);
                                 // Grow by the full deficit at once (the slew
                                 // limits how fast it lands); shrink by creep.
                                 if worst < CUSHION_FLOOR_MS {
-                                    budget_target = (budget_target
+                                    let grown = (budget_target
                                         + (CUSHION_FLOOR_MS - worst)).min(BUDGET_MAX_MS);
+                                    if grown - budget_target > 25.0 {
+                                        // Someone's ring ran thin — the likely
+                                        // audible moment, with its cause.
+                                        tracing::info!(
+                                            evt = "budget-grow",
+                                            worst_cushion_ms = worst,
+                                            from_ms = budget_target,
+                                            to_ms = grown,
+                                            "delay budget growing"
+                                        );
+                                    }
+                                    budget_target = grown;
                                 } else if worst > CUSHION_CEIL_MS {
                                     budget_target = (budget_target - 2.0).max(BUDGET_MIN_MS);
                                 }
@@ -543,10 +619,19 @@ async fn run_stream(
                             .map_err(|e| anyhow!("opus: {e}"))?;
 
                         let anchor = anchor_local_ms.unwrap();
-                        let offset = clock.lock().unwrap().offset();
+                        let (offset, uncertainty, min_rtt) = {
+                            let c = clock.lock().unwrap();
+                            (c.offset(), c.uncertainty(), c.min_rtt())
+                        };
                         if !offset_primed { stream_offset = offset; offset_primed = true; }
                         stream_offset += (offset - stream_offset).clamp(-max_step, max_step);
                         budget += (budget_target - budget).clamp(-max_step, max_step);
+
+                        status.budget_us.store((budget * 1000.0) as i64, Ordering::Relaxed);
+                        status.budget_target_us.store((budget_target * 1000.0) as i64, Ordering::Relaxed);
+                        status.offset_us.store((stream_offset * 1000.0) as i64, Ordering::Relaxed);
+                        status.uncertainty_us.store((uncertainty * 1000.0) as i64, Ordering::Relaxed);
+                        status.min_rtt_us.store((min_rtt * 1000.0) as i64, Ordering::Relaxed);
 
                         let capture_room_ms = anchor
                             + emitted as f64 / STREAM_RATE as f64 * 1000.0

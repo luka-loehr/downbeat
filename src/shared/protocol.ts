@@ -127,7 +127,13 @@ export type ClientMessage =
       cushionMs?: number | null;
       underruns?: number | null;
     }
-  | { t: "cmd"; cmd: HostCommand };
+  | { t: "cmd"; cmd: HostCommand }
+  /**
+   * A batch from the device's local flight recorder (see audio/journal.ts).
+   * The DO writes each entry into the deployment's quality journal, so the
+   * operator's logs can explain a stutter with what the device itself saw.
+   */
+  | { t: "log"; events: Array<{ e: string; at: number } & Record<string, unknown>> };
 
 export type HostCommand =
   | { c: "play"; index?: number; offsetInTrack?: number }

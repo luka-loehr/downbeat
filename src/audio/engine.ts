@@ -3,6 +3,7 @@ import { clamp, median } from "./clock";
 import { loadDeviceOffset, outputLatency, saveDeviceOffset } from "./latency";
 import { LIVE_HEADER_BYTES } from "../shared/protocol";
 import { WORKLET_VERSION } from "../shared/build";
+import { journal } from "./journal";
 
 /**
  * PlaybackEngine -- decode ahead of time, start on a shared instant, then hold
@@ -832,6 +833,17 @@ export class LivePlayer {
       if (Atomics.load(ctl, SEQ_STATS) !== s1) continue;
 
       const streamRate = config.sampleRate;
+      if (underruns > this.stats.underruns) {
+        // The stutter itself, from the device that heard it, with the ring
+        // state around the moment. The DO logs the telemetry delta too; this
+        // local record adds what only the device knows.
+        journal.log("underrun", {
+          count: underruns - this.stats.underruns,
+          total: underruns,
+          minAheadMs: Math.round((minAhead / streamRate) * 1000),
+          appliedRate: Number(rate.toFixed(4)),
+        });
+      }
       this.stats.underruns = underruns;
       this.anchorErrorMs = (errFrames / streamRate) * 1000;
       this.appliedRate = rate;
@@ -1008,6 +1020,9 @@ export class LivePlayer {
     if (Math.abs(sample - this.k) > 0.03) {
       this.kOutliers.push(sample);
       if (this.kOutliers.length >= 3) {
+        journal.log("re-anchor", {
+          shiftMs: Math.round((median(this.kOutliers) - this.k) * 1000),
+        });
         this.k = median(this.kOutliers);
         this.kOutliers = [];
         this.anchored = false;

@@ -48,6 +48,9 @@
   "routes": [{ "pattern": "downbeat.lukaloehr.com", "custom_domain": true }],
   "workers_dev": true,
   "preview_urls": false,
-  "observability": { "enabled": true },
+  // invocation_logs off: at 50 audio packets a second, per-invocation records
+  // are pure noise and a quota furnace. The structured quality events the
+  // RoomDO and the container emit are the log.
+  "observability": { "enabled": true, "logs": { "invocation_logs": false } },
   "vars": { "ENVIRONMENT": "production" }
 }

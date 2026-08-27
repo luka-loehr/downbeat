@@ -59,6 +59,8 @@ export class RoomDO implements DurableObject {
   private p: Persisted = { ...EMPTY };
   private stateTimer: ReturnType<typeof setTimeout> | null = null;
   private lastStateAt = 0;
+  /** Arrival time of the previous live packet; the source-stall detector. */
+  private lastPacketAt = 0;
 
   constructor(
     private readonly ctx: DurableObjectState,
@@ -117,6 +119,7 @@ export class RoomDO implements DurableObject {
       underruns: null,
     };
     server.serializeAttachment(attach);
+    this.qlog({ evt: "join", member: name, role });
 
     this.send(server, {
       t: "welcome",
@@ -149,6 +152,17 @@ export class RoomDO implements DurableObject {
       // accept time, after the Worker checked the host token -- without this,
       // any listener could stream into the room.
       if (!this.ctx.getTags(ws).includes("tx")) return;
+
+      // One compare per packet buys the single most valuable diagnostic in
+      // the system: whether a stutter was born UPSTREAM (a hole in the
+      // source's packet cadence, visible here) or DOWNSTREAM (cadence clean,
+      // but a member's ring ran dry -- see the underrun events). Packets
+      // arrive every 20 ms; a 250 ms hole is ~12 packets of silence risk.
+      if (this.lastPacketAt !== 0 && t1 - this.lastPacketAt > 250) {
+        this.qlog({ evt: "source-gap", gapMs: t1 - this.lastPacketAt });
+      }
+      this.lastPacketAt = t1;
+
       for (const peer of this.ctx.getWebSockets("rx")) {
         try {
           peer.send(raw);
@@ -175,7 +189,30 @@ export class RoomDO implements DurableObject {
     if (!a) return;
 
     switch (msg.t) {
-      case "telemetry":
+      case "telemetry": {
+        // Quality events, edge-triggered against the PREVIOUS report so a
+        // steady-state bad number logs once, not forever. An underrun is a
+        // heard stutter on that device; log it with everything needed to
+        // explain it later.
+        const prevUnderruns = a.underruns ?? 0;
+        const newUnderruns = msg.underruns ?? 0;
+        if (newUnderruns > prevUnderruns) {
+          this.qlog({
+            evt: "underrun",
+            member: a.name,
+            count: newUnderruns - prevUnderruns,
+            total: newUnderruns,
+            cushionMs: msg.cushionMs ?? null,
+            marginMs: msg.marginMs ?? null,
+            rtt: msg.rtt,
+            sync: msg.sync,
+          });
+        }
+        const cushion = msg.cushionMs ?? null;
+        if (cushion !== null && cushion < 120 && (a.cushionMs == null || a.cushionMs >= 120)) {
+          this.qlog({ evt: "cushion-low", member: a.name, cushionMs: cushion, rtt: msg.rtt });
+        }
+
         a.rtt = msg.rtt;
         a.sync = msg.sync;
         a.startError = msg.startError;
@@ -186,6 +223,28 @@ export class RoomDO implements DurableObject {
         ws.serializeAttachment(a);
         this.broadcastStateSoon();
         return;
+      }
+
+      case "log": {
+        // The device's flight recorder, relayed into the quality journal.
+        // Client-supplied data: cap the batch, keep only primitive fields,
+        // truncate strings — a hostile client may spam its own name into the
+        // logs, never break them.
+        if (!Array.isArray(msg.events)) return;
+        for (const ev of msg.events.slice(0, 40)) {
+          if (typeof ev?.e !== "string") continue;
+          const clean: Record<string, unknown> = {};
+          let keys = 0;
+          for (const [k, v] of Object.entries(ev)) {
+            if (keys >= 10) break;
+            if (typeof v === "string") clean[k] = v.slice(0, 200);
+            else if (typeof v === "number" || typeof v === "boolean") clean[k] = v;
+            keys++;
+          }
+          this.qlog({ evt: "client", member: a.name, role: a.role, ...clean });
+        }
+        return;
+      }
 
       case "ready":
         if (msg.seq !== this.p.seq) return; // stale arm, ignore
@@ -208,8 +267,22 @@ export class RoomDO implements DurableObject {
     }
   }
 
+  /**
+   * The room's quality journal: one JSON line per event, into Workers Logs.
+   * Everything here answers "why did last night stutter" without a repro —
+   * `source-gap` means the hole was upstream of the relay, `underrun` means a
+   * specific member's ring ran dry with the numbers that explain why, and the
+   * lifecycle events frame both. Invocation logs are disabled in
+   * wrangler.jsonc, so these lines ARE the log — signal without the 50/s
+   * packet noise.
+   */
+  private qlog(fields: Record<string, unknown>): void {
+    console.log(JSON.stringify({ room: this.p.code, ...fields, at: Date.now() }));
+  }
+
   async webSocketClose(ws: WebSocket): Promise<void> {
     const attach = ws.deserializeAttachment() as Attach | null;
+    if (attach) this.qlog({ evt: "leave", member: attach.name, role: attach.role });
     try {
       ws.close();
     } catch {
@@ -306,6 +379,8 @@ export class RoomDO implements DurableObject {
         return;
 
       case "liveStart":
+        this.qlog({ evt: "live-start", epoch: cmd.live.epoch ?? null, bufferMs: cmd.live.bufferMs });
+        this.lastPacketAt = 0;
         // Live audio replaces file playback rather than fighting with it.
         this.p.mode = "idle";
         this.p.startAt = 0;
@@ -317,6 +392,7 @@ export class RoomDO implements DurableObject {
         return;
 
       case "liveStop":
+        this.qlog({ evt: "live-stop" });
         this.p.live = null;
         await this.save();
         this.broadcast({ t: "live", live: null });

@@ -38,7 +38,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# json: Cloudflare ingests container stdout into Workers Logs, and one JSON
+# object per line is what makes those logs filterable rather than prose.
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [profile.release]
 opt-level = 3

@@ -9,6 +9,7 @@ import { PROTOCOL_VERSION } from "../shared/protocol";
 import { SyncedClock, type ClockStats } from "./clock";
 import { PlaybackEngine, LivePlayer, type EngineStatus, type LiveStats } from "./engine";
 import { claimPlaybackAudioSession, unlockAudio } from "./latency";
+import { journal } from "./journal";
 
 export interface RoomSnapshot {
   connected: boolean;
@@ -100,6 +101,9 @@ export class RoomConnection {
       // 2-second keepalive takes ~8 s of playing at the wrong position. A
       // fresh burst steps the offset within one round trip instead.
       this.ctx.onstatechange = () => {
+        // A suspended context IS silence on this device; nothing explains a
+        // quiet phone in the logs better than this one line.
+        journal.log("audio-context", { state: this.ctx?.state ?? "gone" });
         if (this.ctx?.state === "running" && this.connected) {
           this.clock.reset();
           this.clock.start();
@@ -169,6 +173,7 @@ export class RoomConnection {
     this.ws = ws;
 
     ws.onopen = () => {
+      const reconnected = this.attempt > 0;
       this.connected = true;
       this.attempt = 0;
       this.error = null;
@@ -185,6 +190,15 @@ export class RoomConnection {
       if (this.telemetryTimer === null) {
         this.telemetryTimer = setInterval(() => this.sendTelemetry(), TELEMETRY_MS);
       }
+      // From here on this device's flight recorder streams into the room's
+      // quality journal. Registered per-connection; the journal buffers
+      // across the gaps.
+      journal.setSink((events) => {
+        if (ws.readyState !== WebSocket.OPEN) return false;
+        this.send({ t: "log", events });
+        return true;
+      });
+      if (reconnected) journal.log("ws-reconnected");
       this.emit();
     };
 
@@ -206,6 +220,8 @@ export class RoomConnection {
     ws.onclose = () => {
       this.connected = false;
       this.clock.stop();
+      journal.setSink(null);
+      if (!this.closedByUs) journal.log("ws-lost");
       this.emit();
       if (!this.closedByUs) this.scheduleReconnect();
     };
@@ -396,6 +412,11 @@ export class RoomConnection {
       if (this.live.running && this.liveEpoch !== null && live.epoch === this.liveEpoch) {
         return;
       }
+      journal.log("live-start", {
+        epoch: live.epoch ?? null,
+        restart: this.live.running,
+        bufferMs: live.bufferMs,
+      });
       this.liveEpoch = live.epoch ?? null;
       this.engine?.pause();
       await this.wake();
@@ -408,9 +429,11 @@ export class RoomConnection {
         });
       } catch (err) {
         this.error = err instanceof Error ? err.message : "live playback unavailable";
+        journal.log("live-start-failed", { message: String(err).slice(0, 150) });
         console.error("[downbeat] live start", err);
       }
     } else {
+      if (this.live.running) journal.log("live-stop");
       this.live.stop();
       this.liveEpoch = null;
     }

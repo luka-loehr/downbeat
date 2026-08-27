@@ -55,7 +55,16 @@ instance in minutes.
   seat that never becomes a speaker.
 - **`scripts/setup.sh`**: one guided, idempotent first deploy — creates the
   bucket and database, wires the database id into `wrangler.jsonc`, prompts
-  the four secrets, applies migrations, deploys Worker and container.
+  the two secrets, applies migrations, deploys Worker and container.
+- **A quality journal instead of request noise.** Per-invocation logs are
+  off (50 packets a second of "Ok" is a quota furnace, not a log); what
+  remains is edge-triggered signal. The RoomDO logs every member `underrun`
+  with the cushion/margin/rtt/sync that explain it, `cushion-low` crossings,
+  `source-gap` when the packet cadence itself had a hole at the relay (the
+  one bit that says whether a stutter was born upstream or on the device),
+  `budget-grow` with its cause, and join/leave/live lifecycle. The container
+  logs JSON, one `stats` heartbeat every ten seconds while streaming, and
+  serves the same numbers on its health port.
 
 ### Changed
 - The README is rewritten for self-hosters: what a night looks like, the
