@@ -12,7 +12,14 @@
   "durable_objects": {
     "bindings": [{ "name": "ROOM", "class_name": "RoomDO" }]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RoomDO"] }],
+  // v2/v3 are the scar tissue of the cloud-source experiment (see the
+  // cloud-source branch): the namespace briefly carried a SourceContainer
+  // class, and deleting a DO class needs an explicit migration.
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RoomDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["SourceContainer"] },
+    { "tag": "v3", "deleted_classes": ["SourceContainer"] }
+  ],
   "r2_buckets": [{ "binding": "AUDIO", "bucket_name": "downbeat-audio" }],
   "d1_databases": [
     {
