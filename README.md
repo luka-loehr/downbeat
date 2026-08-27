@@ -2,8 +2,8 @@
 
 [![Worker](https://img.shields.io/badge/Cloudflare-Workers%20%2B%20Durable%20Objects-F38020?style=flat&logo=cloudflare&logoColor=white)](https://developers.cloudflare.com/durable-objects/)
 [![CLI](https://img.shields.io/badge/CLI-Swift%206%20%C2%B7%20one%20native%20binary-F05138?style=flat&logo=swift&logoColor=white)](cli/)
-[![Codec](https://img.shields.io/badge/audio-Opus%2020%20ms%20%C2%B7%2048%20kHz-3ef2a0?style=flat)](#5-how-the-synchronisation-works)
-[![Drift](https://img.shields.io/badge/steady--state%20drift-0.00%20ms-3ef2a0?style=flat)](#5-how-the-synchronisation-works)
+[![Codec](https://img.shields.io/badge/audio-Opus%2020%20ms%20%C2%B7%2048%20kHz-3ef2a0?style=flat)](#6-how-the-synchronisation-works)
+[![Drift](https://img.shields.io/badge/steady--state%20drift-0.00%20ms-3ef2a0?style=flat)](#6-how-the-synchronisation-works)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat)](LICENSE)
 
 **Play one song on every phone in the room, on the same millisecond.**
@@ -11,12 +11,6 @@
 Point a camera at the QR code your Mac prints. Tap once. That is the entire
 setup — no app, no account, no pairing. Whatever your Mac is playing comes out
 of every phone at the same instant, and stays there.
-
-Spotify's own group session drifts by roughly a second between devices, because
-it streams at playback time and every device buffers differently. Downbeat
-inverts that: the audio is on your phone **before** a deadline exists, and all
-that crosses the network at playback time is a timestamp. Network jitter then
-has nothing left to affect.
 
 ```bash
 git clone https://github.com/luka-loehr/downbeat && cd downbeat
@@ -28,9 +22,52 @@ downbeat host                 # prints a QR code
 Downbeat runs on **your** Cloudflare account, not a service someone else
 operates: one Worker, one Durable Object, one R2 bucket, one D1 database, all
 comfortably inside the free tiers except Durable Objects. See
-[§7](#7-deploying-your-own) to stand one up.
+[§8](#8-deploying-your-own) to stand one up.
 
-## 1. Results
+## 1. Isn't this just a Spotify Jam?
+
+A Jam is the feature everyone reaches for. Here is what it actually is, from
+Spotify's own documentation and forums — no strawmen required:
+
+- **A Jam plays on one output.** It is a shared *queue*, not shared
+  *playback*. "Listening along" on your own device exists only for remote
+  Jams, and [every single listener needs their own Premium](https://support.spotify.com/rs-en/article/jam)
+  — a [free guest may add songs to the queue and hear nothing](https://jukeboxduo.com/spotify-jam-without-premium)
+  on their own device.
+- **When several devices do play, nothing synchronizes them.** Spotify's
+  forums document the results: listen-along sessions
+  [audibly off-beat between listeners](https://community.spotify.com/t5/Android/Group-Session-is-off-beat-between-listeners/td-p/5032376),
+  [no compensation for Bluetooth latency at all](https://community.spotify.com/t5/Live-Ideas/Add-a-Manual-Audio-Delay-Sync-Offset-Slider-for-Spotify-Jam/idi-p/7353774),
+  drift from echo-distance up to
+  [tens of seconds, with tracks restarting and cutting off early](https://community.spotify.com/t5/Other-Podcasts-Partners-etc/General-Jam-Issues/td-p/6156646).
+  There is no clock, no correction, no promise — it streams at playback time
+  and hopes.
+- **Users have been asking Spotify for exactly this, in public, for years.**
+  The idea board carries
+  ["True Real-Time Audio Sync Across Devices"](https://community.spotify.com/t5/Live-Ideas/Improve-Spotify-Jam-True-Real-Time-Audio-Sync-Across-Devices/idi-p/7107552)
+  as a feature request — phones as one speaker system is the thing people
+  *assume* a Jam does, discover it doesn't, and then request. Spotify's
+  supported answer to multi-room sync is buying Connect hardware.
+- **Even joining is a gamble:** proximity pairing that finds the session at
+  one party and silently doesn't at the next, guests waving phones at each
+  other while someone re-shares the invite link.
+
+Downbeat is built for exactly that gap:
+
+| | Spotify Jam | Downbeat |
+| --- | --- | --- |
+| Shared control of the music | ✓, up to 32 participants | ✓ — the host's Mac plays anything, Spotify included |
+| Every phone actually plays | remote listen-along only, Premium per listener | ✓ — the entire point, any browser |
+| Devices in sync | never promised; measured in forum complaints | millisecond-locked, and it holds for hours |
+| Joining | proximity pairing, works when it feels like it | a QR code and a six-letter room code — a URL, so it works every single time |
+| Guests need | the Spotify app + an account (+ Premium to hear anything) | a browser tab |
+
+The inversion that makes it work: nothing streams at playback time. Audio is
+on every phone **before** its deadline exists, so all that has to agree
+across the room is a clock — and clocks can be made to agree to a fraction
+of a millisecond ([§6](#6-how-the-synchronisation-works)).
+
+## 2. Results
 
 Measured against the production deployment on `downbeat.lukaloehr.com` from
 Karlsruhe (Cloudflare VIE edge), 2026-08-23.
@@ -55,7 +92,7 @@ Karlsruhe (Cloudflare VIE edge), 2026-08-23.
 > devices has **not** been taken, so these describe the timing pipeline, not
 > the air in the room -- where 34 cm of distance is already a millisecond.
 
-## 2. System
+## 3. System
 
 - **Nothing streams at playback time.** For file playback the audio is fully
   decoded on every device *before* a deadline is chosen, so network jitter is
@@ -85,7 +122,7 @@ Karlsruhe (Cloudflare VIE edge), 2026-08-23.
 - **The player has no buttons.** A joined phone is a speaker, not a remote:
   every control is a way for one device to end up out of step with the others.
 
-## 3. Architecture
+## 4. Architecture
 
 ```text
   Spotify.app  ──┐
@@ -124,7 +161,7 @@ Karlsruhe (Cloudflare VIE edge), 2026-08-23.
 | `cli/Sources/downbeat/` | the host binary: tap, Opus, transport, local playback, dashboard, QR |
 | `migrations/` | D1 schema |
 
-## 4. Quickstart
+## 5. Quickstart
 
 ### Listening
 
@@ -159,7 +196,7 @@ Useful flags:
 | `--no-local` | do not play on this Mac |
 | `--offline` | local capture and playback only, no room |
 
-## 5. How the synchronisation works
+## 6. How the synchronisation works
 
 **The clock.** Each client probes the Durable Object over its WebSocket:
 send `t0`, the DO replies with `t1`, the client stamps `t2`.
@@ -197,7 +234,7 @@ audible as a stutter, and it is exactly the bug this design removes: here the
 mapping only decides *where in the ring* audio lands, and the output itself is
 unconditionally continuous.
 
-## 6. What this deliberately does not do
+## 7. What this deliberately does not do
 
 - **No Spotify Web API.** As of February 2026 new apps are capped at one client
   ID and five users, the app owner must hold Premium, and extended access
@@ -219,7 +256,7 @@ unconditionally continuous.
   what the software does. Downbeat removes the software error; the room is the
   room.
 
-## 7. Deploying your own
+## 8. Deploying your own
 
 Downbeat is not a hosted service. It is a thing you run, and the whole of it is
 in this repository.
@@ -264,7 +301,7 @@ so the rendered modules are fed back through Vision and compared.
 Deployment runs from GitHub Actions on push to `main`; tagging `v*` builds a
 universal CLI binary and attaches it to a release.
 
-## 8. License
+## 9. License
 
 [MIT](LICENSE). Downbeat plays audio you provide or that your own machine is
 already playing; it circumvents no protection and ships no content.
