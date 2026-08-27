@@ -20,29 +20,41 @@ a web page; the guests' player is a browser tab.
 
 ## 1. Isn't this just a Spotify Jam?
 
-A Jam is the feature everyone reaches for, and as a shared queue it's fine.
-But it has one structural gap: **the devices don't play together.** A Jam
-plays on one output, and when guests "listen along" on their own devices,
-each phone streams and buffers independently — playback lands up to a second
-apart, one phone echoing the next. Laying five phones around a room and
-getting one big speaker out of them is precisely the thing a Jam cannot do,
-because it streams at playback time and hopes; nothing in it ever makes two
-devices agree on *when*.
+A Jam is the feature everyone reaches for. Here is what it actually is, from
+Spotify's own documentation and forums — no strawmen required:
 
-And before the first note, there's the joining itself: proximity pairing —
-Bluetooth device discovery that finds the session at one party and silently
-doesn't at the next, guests waving phones at each other while someone
-re-shares the invite link.
+- **A Jam plays on one output.** It is a shared *queue*, not shared
+  *playback*. "Listening along" on your own device exists only for remote
+  Jams, and [every single listener needs their own Premium](https://support.spotify.com/rs-en/article/jam)
+  — a [free guest may add songs to the queue and hear nothing](https://jukeboxduo.com/spotify-jam-without-premium)
+  on their own device.
+- **When several devices do play, nothing synchronizes them.** Spotify's
+  forums document the results: listen-along sessions
+  [audibly off-beat between listeners](https://community.spotify.com/t5/Android/Group-Session-is-off-beat-between-listeners/td-p/5032376),
+  [no compensation for Bluetooth latency at all](https://community.spotify.com/t5/Live-Ideas/Add-a-Manual-Audio-Delay-Sync-Offset-Slider-for-Spotify-Jam/idi-p/7353774),
+  drift from echo-distance up to
+  [tens of seconds, with tracks restarting and cutting off early](https://community.spotify.com/t5/Other-Podcasts-Partners-etc/General-Jam-Issues/td-p/6156646).
+  There is no clock, no correction, no promise — it streams at playback time
+  and hopes.
+- **Users have been asking Spotify for exactly this, in public, for years.**
+  The idea board carries
+  ["True Real-Time Audio Sync Across Devices"](https://community.spotify.com/t5/Live-Ideas/Improve-Spotify-Jam-True-Real-Time-Audio-Sync-Across-Devices/idi-p/7107552)
+  as a feature request — phones as one speaker system is the thing people
+  *assume* a Jam does, discover it doesn't, and then request. Spotify's
+  supported answer to multi-room sync is buying Connect hardware.
+- **Even joining is a gamble:** proximity pairing that finds the session at
+  one party and silently doesn't at the next, guests waving phones at each
+  other while someone re-shares the invite link.
 
 Downbeat is built for exactly that gap:
 
 | | Spotify Jam | Downbeat |
 | --- | --- | --- |
-| Shared control of the music | ✓ | ✓ — you keep using Spotify itself |
-| Every phone actually plays | listen-along, up to ~1 s apart | ✓ — the entire point |
-| Devices in sync | never promised, audibly not | millisecond-locked, and it holds for hours |
+| Shared control of the music | ✓, up to 32 participants | ✓ — you keep using Spotify itself |
+| Every phone actually plays | remote listen-along only, Premium per listener | ✓ — the entire point, any browser |
+| Devices in sync | never promised; measured in forum complaints | millisecond-locked, and it holds for hours |
 | Joining | proximity pairing, works when it feels like it | a QR code and a six-letter room code — a URL, so it works every single time |
-| Guests need | the Spotify app + an account (Premium to listen along) | a browser tab |
+| Guests need | the Spotify app + an account (+ Premium to hear anything) | a browser tab |
 
 The inversion that makes it work: audio arrives on every phone well
 **before** its deadline, so what the network delivers late has already been
@@ -260,6 +272,24 @@ docker build .           # what wrangler deploy ships
 Local Worker development: `npx wrangler dev` (containers run locally through
 Docker). CI typechecks, tests and builds both halves on every push; pushes to
 `main` deploy.
+
+### Watching it run
+
+`npx wrangler tail downbeat` (or the Workers Logs dashboard) carries a
+structured quality journal rather than request noise — per-invocation logs
+are off, so what remains is only signal:
+
+| event | meaning |
+| --- | --- |
+| `underrun` | a member's ring ran dry — a stutter someone heard, with the cushion, margin, rtt and sync that explain it |
+| `cushion-low` | a member crossed under 120 ms of cushion — the warning before the stutter |
+| `source-gap` | a hole in the source's packet cadence at the relay — the stutter was born upstream, not on the device |
+| `budget-grow` | the adaptive delay budget stretched, and for whom |
+| `join` / `leave` / `live-start` / `live-stop` | the frame around all of the above |
+
+The container logs one `stats` line every ten seconds while streaming
+(packet rate, budget, clock offset/uncertainty, worst cushion), and its
+health port serves the same numbers live to the console.
 
 ## 10. License
 
