@@ -14,3 +14,6 @@ cli/.swiftpm/
 cli/dist/
 *.tar.gz
 
+
+# Rust build output from the cloud-source branch
+source/target/
