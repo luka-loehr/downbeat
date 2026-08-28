@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 /// Creates a room over HTTP and then holds the WebSocket that carries both the
 /// clock probes and the audio.
@@ -8,21 +9,31 @@ final class Transport: NSObject, @unchecked Sendable {
     private var task: URLSessionWebSocketTask?
     private var session: URLSession!
     private var probeTimer: Thread?
-    private var running = false
+    /// Read by the probe thread and socket callbacks, written on close.
+    private let runningFlag = Atomic<Bool>(false)
+    private var running: Bool { runningFlag.load(ordering: .relaxed) }
     private var burstLeft = 20
 
     private(set) var code = ""
     private(set) var hostToken = ""
-    /// Set once the socket is open; sends are pointless before that.
-    private(set) var linked = false
+    /// Set once the socket is open; sends are pointless before that. Written
+    /// on the socket queue and the probe thread, read by the encoder thread
+    /// fifty times a second and by the dashboard -- atomic, not luck.
+    private let linkedFlag = Atomic<Bool>(false)
+    var linked: Bool { linkedFlag.load(ordering: .relaxed) }
     /// Frames handed to a dead socket, i.e. audio that reached nobody.
     private(set) var droppedFrames = 0
     /// Sends the socket itself rejected. Ignoring these hid a dead stream
     /// behind a healthy-looking packet counter.
     private(set) var sendErrors = 0
     private(set) var lastSendError = ""
-    /// Frames handed to the socket but not yet acknowledged.
-    private(set) var inFlight = 0
+    /// Frames handed to the socket but not yet acknowledged. Incremented on
+    /// the encoder thread, decremented on the URLSession queue: as a plain
+    /// Int the lost updates only ever drifted UP, and once the drift reached
+    /// the in-flight cap every packet was dropped forever -- a stream that
+    /// dies silently hours in, with a healthy-looking dashboard.
+    private let inFlightCount = Atomic<Int>(0)
+    var inFlight: Int { inFlightCount.load(ordering: .relaxed) }
     /// Messages the socket has handed us. If this stops climbing while sends
     /// keep succeeding, the connection is half-open and the stream is going
     /// nowhere -- which is invisible from the send side alone.
@@ -32,7 +43,12 @@ final class Transport: NSObject, @unchecked Sendable {
     private var reopening = false
     /// Pings go out every 2 s, so a healthy link never stays silent this long.
     private static let staleAfterMs = 8000.0
-    private var lastReceivedMs = RoomClock.localNow()
+    /// Written on the socket queue, read by the probe thread.
+    private let lastReceivedBits = Atomic<UInt64>(RoomClock.localNow().bitPattern)
+    private var lastReceivedMs: Double {
+        get { Double(bitPattern: lastReceivedBits.load(ordering: .relaxed)) }
+        set { lastReceivedBits.store(newValue.bitPattern, ordering: .relaxed) }
+    }
     /// The last liveStart announcement, kept so a reconnect can repeat it --
     /// the Durable Object drops the live state when a source socket dies, and
     /// without a re-announce every listener would keep discarding our packets.
@@ -62,15 +78,34 @@ final class Transport: NSObject, @unchecked Sendable {
     }
     var onMembers: (@Sendable (MemberSnapshot) -> Void)?
 
+    /// Guards the listener-telemetry aggregates below: written on the socket
+    /// queue, read by the adaptive-budget loop and the dashboard tick.
+    private let teleLock = NSLock()
+    private var _minListenerMarginMs = Double.nan
+    private var _minListenerCushionMs = Double.nan
+    private var _totalListenerUnderruns = 0
+    /// Last cumulative underrun count per member name; see the note below.
+    private var underrunBaselines: [String: Double] = [:]
+
     /// Smallest live-arrival margin any listener reports, ms. Diagnostic only:
     /// arrival margin hides decode and hardware latency. NaN = no reports.
-    private(set) var minListenerMarginMs = Double.nan
+    var minListenerMarginMs: Double {
+        teleLock.lock(); defer { teleLock.unlock() }; return _minListenerMarginMs
+    }
     /// Smallest worst-case ring cushion any listener reports, ms -- the least
     /// audio anyone actually had in hand recently, and therefore the adaptive
     /// delay budget's steering signal. NaN = nobody is reporting one yet.
-    private(set) var minListenerCushionMs = Double.nan
-    /// Sum of the cumulative underrun counts across listeners.
-    private(set) var totalListenerUnderruns = 0
+    var minListenerCushionMs: Double {
+        teleLock.lock(); defer { teleLock.unlock() }; return _minListenerCushionMs
+    }
+    /// Monotonic count of listener underruns SINCE THIS SOURCE HAS KNOWN each
+    /// listener. Clients report lifetime-cumulative counts, but the steering
+    /// question is "did anyone fall behind since last time" -- so a joining
+    /// device's opening number is a baseline, not news. Summing raw counts
+    /// made every join look like an emergency and grew the room's latency.
+    var totalListenerUnderruns: Int {
+        teleLock.lock(); defer { teleLock.unlock() }; return _totalListenerUnderruns
+    }
 
     init(baseURL: URL, clock: RoomClock) {
         self.baseURL = baseURL
@@ -157,8 +192,8 @@ final class Transport: NSObject, @unchecked Sendable {
         ]
         let task = session.webSocketTask(with: components.url!)
         self.task = task
-        running = true
-        linked = true
+        runningFlag.store(true, ordering: .relaxed)
+        linkedFlag.store(true, ordering: .relaxed)
         lastReceivedMs = RoomClock.localNow()
         task.resume()
         receive()
@@ -173,7 +208,7 @@ final class Transport: NSObject, @unchecked Sendable {
                 // silent stretch this long means the link is gone -- reopen
                 // it instead of waiting to be told.
                 if self.linked, RoomClock.localNow() - self.lastReceivedMs > Self.staleAfterMs {
-                    self.linked = false
+                    self.linkedFlag.store(false, ordering: .relaxed)
                     self.onLink?(false, "nothing received for \(Int(Self.staleAfterMs / 1000)) s")
                     self.scheduleReopen()
                 }
@@ -189,7 +224,7 @@ final class Transport: NSObject, @unchecked Sendable {
     }
 
     func close() {
-        running = false
+        runningFlag.store(false, ordering: .relaxed)
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
     }
@@ -222,7 +257,7 @@ final class Transport: NSObject, @unchecked Sendable {
                 // being handed to a dead task and the packet counter kept
                 // rising, so the host looked healthy while nobody heard
                 // anything. Reconnect, and say so.
-                self.linked = false
+                self.linkedFlag.store(false, ordering: .relaxed)
                 self.onLink?(false, error.localizedDescription)
                 self.scheduleReopen()
             case .success(let message):
@@ -265,7 +300,7 @@ final class Transport: NSObject, @unchecked Sendable {
         self.task = task
         task.resume()
         receive()
-        linked = true
+        linkedFlag.store(true, ordering: .relaxed)
         lastReceivedMs = RoomClock.localNow()
         // The new socket may ride a completely different network path, and the
         // old probe history would then outvote the truth for minutes. Start
@@ -294,26 +329,67 @@ final class Transport: NSObject, @unchecked Sendable {
            let members = state["members"] as? [[String: Any]] {
             // The source is in the member list too; the host cares about speakers.
             let speakers = members.filter { ($0["role"] as? String) != "source" }
+
+            // A device whose context clock is not running at wall-clock rate
+            // measured everything it reports with a broken ruler. Left in, its
+            // runaway underrun count trips the emergency budget growth every
+            // tick and pins the whole room at maximum latency; its cushion is
+            // fiction in whichever direction the clock broke. Steer only by
+            // the healthy devices, and let the dashboard show the sick one.
+            // The cushion bound also catches clients from before ctxRate
+            // existed: no genuine ring holds a minute of audio.
+            func clockBroken(_ m: [String: Any]) -> Bool {
+                if let r = m["ctxRate"] as? Double, abs(r - 1) > 0.1 { return true }
+                if let c = m["cushionMs"] as? Double, c > 60_000 { return true }
+                return false
+            }
+            let healthy = speakers.filter { !clockBroken($0) }
+
             var spread = 0.0
-            let playouts = speakers.compactMap { $0["playoutMs"] as? Double }
+            let playouts = healthy.compactMap { $0["playoutMs"] as? Double }
             if playouts.count > 1, let lo = playouts.min(), let hi = playouts.max() {
                 spread = hi - lo
             }
-            let margins = speakers.compactMap { $0["marginMs"] as? Double }
-            minListenerMarginMs = margins.min() ?? .nan
-            let cushions = speakers.compactMap { $0["cushionMs"] as? Double }
-            minListenerCushionMs = cushions.min() ?? .nan
-            totalListenerUnderruns = speakers
-                .compactMap { $0["underruns"] as? Double }
-                .reduce(0) { $0 + Int($1) }
+            let margins = healthy.compactMap { $0["marginMs"] as? Double }
+            let cushions = healthy.compactMap { $0["cushionMs"] as? Double }
+            teleLock.lock()
+            _minListenerMarginMs = margins.min() ?? .nan
+            _minListenerCushionMs = cushions.min() ?? .nan
+            var baselines: [String: Double] = [:]
+            for m in healthy {
+                guard let name = m["name"] as? String,
+                      let u = m["underruns"] as? Double else { continue }
+                baselines[name] = u
+                // A count below its baseline is a reloaded page starting over.
+                if let prior = underrunBaselines[name], u > prior {
+                    _totalListenerUnderruns += Int(u - prior)
+                }
+            }
+            underrunBaselines = baselines
+            teleLock.unlock()
+            // Names arrive from strangers' phones and are drawn straight onto
+            // the HOST's terminal: a control character in one is an escape-
+            // sequence injection into the host's tty, not a display quirk.
+            func safeName(_ raw: Any?) -> String {
+                guard let raw = raw as? String else { return "Speaker" }
+                let clean = String(String.UnicodeScalarView(
+                    raw.unicodeScalars.filter {
+                        // C0 controls, DEL and the C1 range: everything a
+                        // terminal might interpret rather than display.
+                        $0.value >= 0x20 && $0.value != 0x7f && !(0x80...0x9f).contains($0.value)
+                    }))
+                return clean.isEmpty ? "Speaker" : String(clean.prefix(24))
+            }
             let infos = speakers.map { m in
                 MemberInfo(
-                    name: m["name"] as? String ?? "Speaker",
+                    name: safeName(m["name"]),
                     role: m["role"] as? String ?? "listener",
                     rtt: m["rtt"] as? Double ?? 0,
                     sync: m["sync"] as? Double ?? 0,
                     cushionMs: m["cushionMs"] as? Double,
-                    playoutMs: m["playoutMs"] as? Double)
+                    playoutMs: m["playoutMs"] as? Double,
+                    ctxRate: m["ctxRate"] as? Double,
+                    clockBroken: clockBroken(m))
             }
             onMembers?(MemberSnapshot(count: speakers.count, spreadMs: spread, members: infos))
         }
@@ -374,10 +450,10 @@ final class Transport: NSObject, @unchecked Sendable {
         withUnsafeBytes(of: playAtRoomMs.bitPattern.littleEndian) { frame.append(contentsOf: $0) }
         withUnsafeBytes(of: Double(sampleIndex).bitPattern.littleEndian) { frame.append(contentsOf: $0) }
         frame.append(packet)
-        inFlight += 1
+        inFlightCount.wrappingAdd(1, ordering: .relaxed)
         task.send(.data(frame)) { [weak self] error in
             guard let self else { return }
-            self.inFlight -= 1
+            self.inFlightCount.wrappingSubtract(1, ordering: .relaxed)
             if let error {
                 self.sendErrors += 1
                 self.lastSendError = error.localizedDescription

@@ -178,6 +178,17 @@ export function Room({ code, hostToken }: { code: string; hostToken: string | nu
         </section>
       )}
 
+      {/* The watchdog's verdict: this browser's audio output died underneath
+          us and only a fresh AudioContext -- which needs a tap -- revives it. */}
+      {snap.audioBroken && conn && (
+        <button
+          onClick={() => void conn.repairAudio()}
+          className="mt-6 w-full rounded-2xl bg-pulse px-6 py-6 text-sm font-bold uppercase tracking-[0.24em] text-void transition-opacity active:opacity-80"
+        >
+          Sound stuck — tap to fix
+        </button>
+      )}
+
       {snap.error && (
         <p className="mt-6 rounded-lg border border-pulse/40 bg-pulse/10 px-4 py-3 text-center text-sm text-pulse">
           {snap.error}

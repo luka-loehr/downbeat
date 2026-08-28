@@ -21,8 +21,8 @@ let VERSION = "0.4.0"
 
 struct Options {
     var pid: pid_t?          // nil = whole system
-    var sourceLabel = "Spotify"
-    var bufferMs: Double = 2000
+    var sourceLabel = "System"
+    var bufferMs: Double = 500
     /// Floor for the adaptive delay budget; the pipeline needs ~150 ms.
     var minBufferMs: Double = 350
     /// Adapt the budget at runtime from listener telemetry.
@@ -47,7 +47,7 @@ func parseOptions() -> Options {
         switch args[i] {
         case "--source":
             i += 1
-            let v = i < args.count ? args[i] : "spotify"
+            let v = i < args.count ? args[i] : "system"
             if v.lowercased() == "system" {
                 o.pid = nil; o.sourceLabel = "System"
             } else if let pid = pid_t(v) {
@@ -84,16 +84,6 @@ func parseOptions() -> Options {
         }
         i += 1
     }
-    if o.sourceLabel == "Spotify" && o.pid == nil {
-        if let found = AudioSources.find(named: "Spotify") {
-            o.pid = found.pid
-        } else if let music = AudioSources.find(named: "Music") {
-            // Nothing from Spotify, but Apple Music is playing -- take that
-            // rather than refusing to start over a default nobody chose.
-            o.pid = music.pid
-            o.sourceLabel = music.name
-        }
-    }
     return o
 }
 
@@ -109,8 +99,8 @@ func printHelp() {
 
     OPTIONS FOR host
       --source <app|system|pid>  app name (Spotify, Music, …), "system"
-                                 for everything, or a process id
-      --buffer <ms>              starting delay budget, default 2000 —
+                                 for everything (the default), or a process id
+      --buffer <ms>              starting delay budget, default 500 —
                                  adapts at runtime toward the smallest
                                  value the room's listeners can carry
       --min-buffer <ms>          the adaptive budget's floor (350)
@@ -241,14 +231,17 @@ let adaptiveBufferMs = Atomic<UInt64>(options.bufferMs.bitPattern)
 let minBufferMs = min(options.minBufferMs, options.bufferMs)
 let maxBufferMs = max(2000, options.bufferMs)
 
+/**
+ Capture/encode counters. Lock-free on purpose: the peak is written from the
+ REALTIME capture callback, where taking an NSLock — however briefly — risks
+ priority inversion against the dashboard tick and an audible dropout.
+ */
 final class Stats: @unchecked Sendable {
-    var peak: Float = 0
-    var captured: Int64 = 0
-    var sent: Int64 = 0
-    var bytes: Int64 = 0
-    /// One peak per capture callback (~10 ms), drained by the dashboard tick.
-    var levels: [Float] = []
-    let lock = NSLock()
+    /// Peak since the last dashboard tick, as a Float bit pattern (CAS max).
+    let peakBits = Atomic<UInt32>(0)
+    let captured = Atomic<Int64>(0)
+    let sent = Atomic<Int64>(0)
+    let bytes = Atomic<Int64>(0)
 }
 let stats = Stats()
 
@@ -279,6 +272,40 @@ final class MembersBox: @unchecked Sendable {
 }
 let membersBox = MembersBox()
 
+/**
+ Diffs each roster against the last so joins, leaves and clock-health flips
+ land in the log with a timestamp. "When did that phone join?" and "when did
+ it break?" must be answerable AFTER the night, from the panel -- a sync fault
+ lasts ten seconds and the evidence is gone by the time anyone asks.
+ */
+final class RosterWatch: @unchecked Sendable {
+    private var known: [String: MemberInfo] = [:]
+    private let lock = NSLock()
+    func diff(_ members: [MemberInfo], into log: UILog) {
+        lock.lock(); defer { lock.unlock() }
+        var next: [String: MemberInfo] = [:]
+        for m in members { next[m.name] = m }
+        for (name, m) in next {
+            guard let old = known[name] else {
+                log.add("\(name) joined")
+                if m.clockBroken { log.add("⚠ \(name): audio clock broken — not steering by it") }
+                continue
+            }
+            if m.clockBroken != old.clockBroken {
+                if m.clockBroken {
+                    let rate = m.ctxRate.map { String(format: " (×%.1f)", $0) } ?? ""
+                    log.add("⚠ \(name): audio clock broken\(rate) — not steering by it")
+                } else {
+                    log.add("\(name): audio clock recovered")
+                }
+            }
+        }
+        for name in known.keys where next[name] == nil { log.add("\(name) left") }
+        known = next
+    }
+}
+let rosterWatch = RosterWatch()
+
 /// Source-picker overlay state, shared between the key thread and the drawer.
 final class PickerBox: @unchecked Sendable {
     private var sources: [AudioSource]? = nil
@@ -292,8 +319,11 @@ let picker = PickerBox()
 nonisolated(unsafe) var player: LocalPlayer?
 nonisolated(unsafe) var transport: Transport?
 nonisolated(unsafe) var anchorLocalMs: Double = 0
-nonisolated(unsafe) var anchored = false
-nonisolated(unsafe) var stopping = false
+/// Capture anchor: `anchorLocalMs` is written BEFORE this flips true, with
+/// release/acquire ordering, so any thread that sees `true` sees the anchor.
+let anchoredFlag = Atomic<Bool>(false)
+/// Set by signal handlers and the key thread; ONLY the main loop tears down.
+let stopFlag = Atomic<Bool>(false)
 /**
  Latest (host-time ms, frames-written) pair from the capture callback.
 
@@ -320,6 +350,7 @@ if !options.offline {
     }
     t.onMembers = { @Sendable snapshot in
         membersBox.set(snapshot.members)
+        rosterWatch.diff(snapshot.members, into: uiLog)
     }
     t.connect()
     transport = t
@@ -336,13 +367,12 @@ if !options.offline {
  */
 @Sendable func captureCallback(_ samples: UnsafePointer<Float>, _ frames: Int, _ hostTime: UInt64) {
     let localMs = RoomClock.localMs(hostTime: hostTime)
-    if !anchored {
+    if !anchoredFlag.load(ordering: .acquiring) {
         anchorLocalMs = localMs
-        anchored = true
+        anchoredFlag.store(true, ordering: .releasing)
     }
     if let p = player, !p.anchored {
-        p.anchorLocalMs = anchorLocalMs
-        p.anchored = true
+        p.setAnchor(localMs: anchorLocalMs)
     }
     // Real progress: at host time `localMs`, exactly this many frames existed.
     // The buffer's own hardware timestamp, not the time this thread ran.
@@ -371,12 +401,14 @@ if !options.offline {
         ring.write(samples, frames: frames)
     }
 
-    stats.lock.lock()
-    stats.captured += Int64(frames)
-    if localPeak > stats.peak { stats.peak = localPeak }
-    stats.levels.append(localPeak)
-    if stats.levels.count > 400 { stats.levels.removeFirst(stats.levels.count - 400) }
-    stats.lock.unlock()
+    stats.captured.wrappingAdd(Int64(frames), ordering: .relaxed)
+    var bits = stats.peakBits.load(ordering: .relaxed)
+    while localPeak > Float(bitPattern: bits) {
+        let (done, current) = stats.peakBits.compareExchange(
+            expected: bits, desired: localPeak.bitPattern, ordering: .relaxed)
+        if done { break }
+        bits = current
+    }
 }
 
 do {
@@ -400,7 +432,7 @@ let channels = tap.format.channels
  runs or how honest the capture crystal is.
  */
 @Sendable func timelineErrorMs() -> Double {
-    guard anchored else { return 0 }
+    guard anchoredFlag.load(ordering: .acquiring) else { return 0 }
     let pair = captureProgress.load(ordering: .acquiring)
     guard pair.first != 0 else { return 0 }
     let hostMs = Double(bitPattern: UInt64(pair.first))
@@ -411,9 +443,8 @@ let channels = tap.format.channels
 if options.playLocally {
     let p = LocalPlayer(ring: ring, clock: clock, sampleRate: rate,
                         channels: channels, bufferMs: options.bufferMs)
-    if anchored {
-        p.anchorLocalMs = anchorLocalMs
-        p.anchored = true
+    if anchoredFlag.load(ordering: .acquiring) {
+        p.setAnchor(localMs: anchorLocalMs)
     }
     p.timelineError = { timelineErrorMs() }
     player = p
@@ -460,7 +491,8 @@ if let t = transport {
         let scratch = UnsafeMutablePointer<Float>.allocate(capacity: frameSize * channels)
         defer { scratch.deallocate() }
         while true {
-            guard anchored, ring.framesWritten >= encoded + Int64(frameSize) else {
+            guard anchoredFlag.load(ordering: .acquiring),
+                  ring.framesWritten >= encoded + Int64(frameSize) else {
                 Thread.sleep(forTimeInterval: 0.005); continue
             }
             ring.read(into: scratch, from: encoded, frames: frameSize)
@@ -480,10 +512,8 @@ if let t = transport {
                     + streamOffset
                 let buffer = Double(bitPattern: adaptiveBufferMs.load(ordering: .relaxed))
                 t.sendPacket(packet, playAtRoomMs: captureRoomMs + buffer, sampleIndex: encoded)
-                stats.lock.lock()
-                stats.sent += 1
-                stats.bytes += Int64(packet.count)
-                stats.lock.unlock()
+                stats.sent.wrappingAdd(1, ordering: .relaxed)
+                stats.bytes.wrappingAdd(Int64(packet.count), ordering: .relaxed)
             }
             encoded += Int64(frameSize)
         }
@@ -498,7 +528,16 @@ if let t = transport {
 
 /// Guards a swap against a second one arriving while the first is in flight.
 let switching = Atomic<Bool>(false)
-nonisolated(unsafe) var currentLabel = options.sourceLabel
+/// Written by the key thread on a source switch, read by the render loop --
+/// an unguarded String there is a copy-on-write race, not just a stale label.
+final class TextBox: @unchecked Sendable {
+    private var value: String
+    private let lock = NSLock()
+    init(_ v: String) { value = v }
+    func set(_ v: String) { lock.lock(); value = v; lock.unlock() }
+    func get() -> String { lock.lock(); defer { lock.unlock() }; return value }
+}
+let currentLabel = TextBox(options.sourceLabel)
 
 /**
  Point the capture at a different app without interrupting the room.
@@ -512,7 +551,7 @@ nonisolated(unsafe) var currentLabel = options.sourceLabel
 
     tap.stop()
     // Pad the silence of the swap so stream position keeps tracking the clock.
-    if anchored {
+    if anchoredFlag.load(ordering: .acquiring) {
         let expected = Int64((RoomClock.localMs(hostTime: mach_absolute_time())
                               - anchorLocalMs) / 1000 * 48000)
         let behind = expected - ring.framesWritten
@@ -523,7 +562,7 @@ nonisolated(unsafe) var currentLabel = options.sourceLabel
         try tap.start(pid: pid, mute: options.mute) { @Sendable samples, frames, hostTime in
             captureCallback(samples, frames, hostTime)
         }
-        currentLabel = label
+        currentLabel.set(label)
         uiLog.add("source: \(label)")
     } catch {
         uiLog.add("source switch failed: \(error)")
@@ -536,26 +575,39 @@ nonisolated(unsafe) var currentLabel = options.sourceLabel
 
 // ---- shutdown -------------------------------------------------------------
 
-nonisolated func shutdown() {
-    stopping = true
-    transport?.stopLive()
-    transport?.endSession()
-    transport?.close()
-    player?.stop()
-    tap.stop()
+/**
+ Teardown belongs to ONE thread. Signal handlers and the key thread only set
+ the flag: URLSession, semaphores and AudioUnit stops are all async-signal-
+ unsafe, and running them inside a handler can deadlock with the tty still in
+ raw mode on the alternate screen. The main loop notices the flag within a
+ tick, renders one last "stopping…" frame, tears down in order, and restores
+ the terminal LAST so nothing ever prints into the alternate screen.
+ */
+nonisolated func requestStop(_ sig: Int32) { stopFlag.store(true, ordering: .relaxed) }
+
+/// Ctrl-Z must hand the shell its terminal back; `fg` must take it again.
+nonisolated func suspendToShell(_ sig: Int32) {
     Terminal.restore()
-    print("stopped — the source is audible again")
+    signal(SIGTSTP, SIG_DFL)
+    raise(SIGTSTP)
 }
 
-signal(SIGINT) { _ in shutdown(); exit(0) }
-signal(SIGTERM) { _ in shutdown(); exit(0) }
+signal(SIGINT, requestStop)
+signal(SIGTERM, requestStop)
+// Ctrl-\ would otherwise kill the process with the tty still raw + alternate.
+signal(SIGQUIT, requestStop)
+signal(SIGTSTP, suspendToShell)
+signal(SIGCONT) { _ in
+    signal(SIGTSTP, suspendToShell)
+    if Terminal.isInteractive { Terminal.enter() }
+}
 
 // ---- keys ------------------------------------------------------------------
 
 if Terminal.isInteractive {
     Terminal.enter()
     let keys = Thread {
-        while !stopping {
+        while !stopFlag.load(ordering: .relaxed) {
             guard let key = Terminal.readKey() else { continue }
             switch key {
             case .escape:
@@ -578,8 +630,10 @@ if Terminal.isInteractive {
                 }
                 switch k {
                 case "q", "\u{3}":
-                    shutdown()
-                    exit(0)
+                    // The main loop owns teardown; racing it from this thread
+                    // used to flip the screen mid-frame and dump the repaint
+                    // into the user's scrollback.
+                    stopFlag.store(true, ordering: .relaxed)
                 case "m":
                     if let p = player { p.gain = p.gain > 0 ? 0 : 1 }
                 case "+", "=":
@@ -617,15 +671,21 @@ let joinHost: String = transport.map { t in
 /// cushion is measured at the point of consumption, so decode latency,
 /// hardware output latency and every jitter dip are already inside it.
 let safeCushionMs = 250.0
-/// Trim at a third of the 0.3 % steady correction ceiling, so every device
-/// tracks the moving schedule with authority to spare. Growth deliberately
-/// exceeds the steady ceiling -- it is an emergency -- but stays inside the
-/// 1 % recovery band, slewed on the shared value rather than stepped.
+/// The budget moves proportionally to how wrong it is, within these rails.
+/// Trim tops out at 2.5 ms/s -- with the 2 ms/s clock slew riding along it
+/// still fits under every player's 0.5 % steady steering ceiling, so the
+/// moving schedule is tracked with authority to spare. Growth is an
+/// emergency and may exceed the steady ceiling, but 12 ms/s stays inside
+/// the 1.5 % recovery band every player grants it, slewed on the shared
+/// value rather than stepped.
 let trimMsPerSecond = 1.0
+let trimMaxMsPerSecond = 2.5
 let growMsPerSecond = 6.0
+let growMaxMsPerSecond = 12.0
 let tick = 0.2
 var lastUnderrunTotal = 0
-var levelHistory: [Double] = []
+/// Edge trigger so a sustained underrun burst logs once, not five times a second.
+var underrunEmergency = false
 let started = RoomClock.localNow()
 var lastPlainPrint = 0.0
 
@@ -639,13 +699,25 @@ while true {
         if !cushion.isNaN {
             var target = current + (safeCushionMs - cushion)
             let underruns = t.totalListenerUnderruns
-            if underruns > lastUnderrunTotal { target = max(target, current + 300) }
+            if underruns > lastUnderrunTotal {
+                target = max(target, current + 300)
+                if !underrunEmergency {
+                    underrunEmergency = true
+                    uiLog.add("listener underruns +\(underruns - lastUnderrunTotal) — growing buffer")
+                }
+            } else {
+                underrunEmergency = false
+            }
             lastUnderrunTotal = underruns
             target = min(max(target, minBufferMs), maxBufferMs)
             let delta = target - current
             // The deadband keeps measurement noise from rocking the budget.
             if abs(delta) > 40 {
-                let slew = delta > 0 ? growMsPerSecond : trimMsPerSecond
+                // Proportional: gentle just outside the deadband, at the cap
+                // once the weakest cushion is ~180 ms short (or ~300 ms fat).
+                let slew = delta > 0
+                    ? min(growMaxMsPerSecond, max(growMsPerSecond, delta / 15))
+                    : min(trimMaxMsPerSecond, max(trimMsPerSecond, -delta / 120))
                 let step = min(abs(delta), slew * tick)
                 let next = current + (delta > 0 ? step : -step)
                 adaptiveBufferMs.store(next.bitPattern, ordering: .relaxed)
@@ -655,33 +727,22 @@ while true {
     }
 
     // ---- gather ----------------------------------------------------------
-    stats.lock.lock()
-    let peak = stats.peak
-    let captured = stats.captured
-    let sent = stats.sent
-    let bytes = stats.bytes
-    let drained = stats.levels
-    stats.peak = 0
-    stats.levels.removeAll(keepingCapacity: true)
-    stats.lock.unlock()
-
-    for level in drained {
-        levelHistory.append(level > 0 ? 20 * log10(Double(level)) : -120)
-    }
-    if levelHistory.count > 1024 { levelHistory.removeFirst(levelHistory.count - 1024) }
+    let peak = Float(bitPattern: stats.peakBits.exchange(0, ordering: .relaxed))
+    let captured = stats.captured.load(ordering: .relaxed)
+    let sent = stats.sent.load(ordering: .relaxed)
+    let bytes = stats.bytes.load(ordering: .relaxed)
 
     let secs = max(1, Int((RoomClock.localNow() - started) / 1000))
     let members = membersBox.get()
 
     if Terminal.isInteractive {
         var state = DashboardState()
-        state.source = currentLabel
+        state.source = currentLabel.get()
         state.uptimeSec = secs
         state.code = transport?.code ?? "OFFLINE"
         state.joinHost = joinHost
         state.qr = qrModules
         state.peakDb = peak > 0 ? 20 * log10(Double(peak)) : -120
-        state.levelsDb = levelHistory
         state.clockMs = clock.uncertainty
         state.synced = clock.isSynced
         state.offline = options.offline
@@ -696,7 +757,7 @@ while true {
         state.members = members
         state.log = uiLog.snapshot()
         state.picker = picker.get()
-        state.stopping = stopping
+        state.stopping = stopFlag.load(ordering: .relaxed)
 
         let linked = transport?.linked ?? true
         if options.offline {
@@ -727,4 +788,19 @@ while true {
                          player?.starvedFrames ?? 0))
         }
     }
+
+    // Checked AFTER the render so the "stopping…" footer note is on screen
+    // while endSession() below spends up to two seconds handing the room back.
+    if stopFlag.load(ordering: .relaxed) { break }
 }
+
+// ---- teardown: one thread, one order, terminal restored last ---------------
+
+transport?.stopLive()
+transport?.endSession()
+transport?.close()
+player?.stop()
+tap.stop()
+Terminal.restore()
+print("stopped — the source is audible again")
+exit(0)

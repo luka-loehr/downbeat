@@ -9,6 +9,7 @@ import { PROTOCOL_VERSION } from "../shared/protocol";
 import { SyncedClock, type ClockStats } from "./clock";
 import { PlaybackEngine, LivePlayer, type EngineStatus, type LiveStats } from "./engine";
 import { claimPlaybackAudioSession, unlockAudio } from "./latency";
+import { ContextClockWatchdog } from "./watchdog";
 
 export interface RoomSnapshot {
   connected: boolean;
@@ -19,6 +20,13 @@ export interface RoomSnapshot {
   engine: EngineStatus;
   live: LiveStats | null;
   error: string | null;
+  /**
+   * The context clock is not advancing at wall-clock rate: the OS audio
+   * stream underneath it is dead and this device is rendering silence.
+   * Recovery needs a fresh AudioContext, and that needs a tap -- the UI
+   * shows one, wired to `repairAudio()`.
+   */
+  audioBroken: boolean;
 }
 
 type Listener = (s: RoomSnapshot) => void;
@@ -32,6 +40,8 @@ const RECONNECT_MAX_MS = 8000;
  * fire for minutes. Probes go out every 2 s, so a healthy link never trips it.
  */
 const PONG_TIMEOUT_MS = 7000;
+/** Watchdog cadence; two bad 1 s windows in a row declare the clock broken. */
+const WATCHDOG_SAMPLE_MS = 1000;
 
 export class RoomConnection {
   private ws: WebSocket | null = null;
@@ -49,6 +59,9 @@ export class RoomConnection {
   private attempt = 0;
 
   private visibilityHooked = false;
+  private watchdog = new ContextClockWatchdog(() => this.ctx?.currentTime ?? 0);
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
+  private audioBroken = false;
   private telemetryTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private listeners = new Set<Listener>();
@@ -78,42 +91,7 @@ export class RoomConnection {
 
   /** Must be called from a user gesture: iOS will not start audio otherwise. */
   async start(): Promise<void> {
-    if (!this.ctx) {
-      const Ctor =
-        window.AudioContext ??
-        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      // `interactive` asks for the smallest buffer the device will give us,
-      // which keeps the browser's own latency estimate small and stable.
-      //
-      // 48 kHz is requested explicitly because live playback indexes its ring
-      // in output frames: if the context ran at 44.1 kHz while the stream is
-      // 48 kHz, every packet would land in the wrong place. Not every device
-      // honours the request, so fall back rather than fail to start at all.
-      try {
-        this.ctx = new Ctor({ latencyHint: "interactive", sampleRate: 48000 });
-      } catch {
-        this.ctx = new Ctor({ latencyHint: "interactive" });
-      }
-      await unlockAudio(this.ctx);
-      // Coming back from a suspension, the clock estimate is wrong by however
-      // long the page's clocks were frozen -- and confirming that over the
-      // 2-second keepalive takes ~8 s of playing at the wrong position. A
-      // fresh burst steps the offset within one round trip instead.
-      this.ctx.onstatechange = () => {
-        if (this.ctx?.state === "running" && this.connected) {
-          this.clock.reset();
-          this.clock.start();
-        }
-      };
-      this.engine = new PlaybackEngine(this.ctx, this.clock);
-      this.engine.subscribe(() => this.emit());
-      this.live = new LivePlayer(
-        this.ctx,
-        this.clock,
-        this.engine.output,
-        () => this.engine?.deviceOffsetMs ?? 0,
-      );
-    }
+    if (!this.ctx) await this.buildAudio();
     this.closedByUs = false;
     this.open();
 
@@ -136,6 +114,85 @@ export class RoomConnection {
     }
   }
 
+  /** Create the context, engine and live player. Needs a user gesture. */
+  private async buildAudio(): Promise<void> {
+    const Ctor =
+      window.AudioContext ??
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    // `interactive` asks for the smallest buffer the device will give us,
+    // which keeps the browser's own latency estimate small and stable.
+    //
+    // 48 kHz is requested explicitly because live playback indexes its ring
+    // in output frames: if the context ran at 44.1 kHz while the stream is
+    // 48 kHz, every packet would land in the wrong place. Not every device
+    // honours the request, so fall back rather than fail to start at all.
+    try {
+      this.ctx = new Ctor({ latencyHint: "interactive", sampleRate: 48000 });
+    } catch {
+      this.ctx = new Ctor({ latencyHint: "interactive" });
+    }
+    await unlockAudio(this.ctx);
+    // Coming back from a suspension, the clock estimate is wrong by however
+    // long the page's clocks were frozen -- and confirming that over the
+    // 2-second keepalive takes ~8 s of playing at the wrong position. A
+    // fresh burst steps the offset within one round trip instead.
+    this.ctx.onstatechange = () => {
+      if (this.ctx?.state === "running" && this.connected) {
+        this.clock.reset();
+        this.clock.start();
+      }
+    };
+    this.engine = new PlaybackEngine(this.ctx, this.clock);
+    this.engine.subscribe(() => this.emit());
+    this.live = new LivePlayer(
+      this.ctx,
+      this.clock,
+      this.engine.output,
+      () => this.engine?.deviceOffsetMs ?? 0,
+    );
+
+    if (this.watchdogTimer === null) {
+      this.watchdogTimer = setInterval(() => {
+        this.watchdog.sample(this.ctx?.state === "running");
+        if (this.watchdog.broken !== this.audioBroken) {
+          this.audioBroken = this.watchdog.broken;
+          this.emit();
+        }
+      }, WATCHDOG_SAMPLE_MS);
+    }
+  }
+
+  /**
+   * Tear the whole audio stack down and rebuild it, from a user gesture.
+   *
+   * This exists for one failure mode: the OS output stream under the context
+   * is dead and the context clock freewheels (the watchdog's verdict). No API
+   * on the existing context revives that stream -- `resume()` reports success
+   * on a context that already claims to be running -- so the only cure is a
+   * fresh AudioContext, and creating one needs the tap this is wired to.
+   */
+  async repairAudio(): Promise<void> {
+    const old = this.ctx;
+    this.live?.stop();
+    this.engine?.pause();
+    this.ctx = null;
+    this.engine = null;
+    this.live = null;
+    // Force reconcile() to treat everything as never-scheduled: the new
+    // engine has no decoded buffers and the new player has no anchor.
+    this.liveEpoch = null;
+    this.scheduledSeq = -1;
+    this.armedSeq = -1;
+    this.watchdog.reset();
+    this.audioBroken = false;
+    // Not awaited: staying inside the user gesture matters more than a tidy
+    // close, and Chrome caps live contexts, so release the slot in parallel.
+    if (old) void old.close().catch(() => {});
+    await this.buildAudio();
+    this.emit();
+    await this.reconcile();
+  }
+
   stop(): void {
     this.closedByUs = true;
     this.clock.stop();
@@ -143,8 +200,11 @@ export class RoomConnection {
     this.engine?.pause();
     if (this.telemetryTimer !== null) clearInterval(this.telemetryTimer);
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    if (this.watchdogTimer !== null) clearInterval(this.watchdogTimer);
     this.telemetryTimer = null;
     this.reconnectTimer = null;
+    this.watchdogTimer = null;
+    this.watchdog.reset();
     this.ws?.close();
     this.ws = null;
     this.connected = false;
@@ -454,6 +514,11 @@ export class RoomConnection {
       cushionMs:
         settled && live.cushionMs !== null ? Math.round(live.cushionMs) : null,
       underruns: settled ? live.underruns : null,
+      // The context clock's measured rate against wall time. 1.0 is healthy;
+      // anything else means every other number this device reports is being
+      // measured with a broken ruler, and the source must not steer by them.
+      ctxRate:
+        this.watchdog.rate === null ? null : Math.round(this.watchdog.rate * 100) / 100,
     });
   }
 
@@ -503,6 +568,7 @@ export class RoomConnection {
         },
       live: this.liveStats(),
       error: this.error,
+      audioBroken: this.audioBroken,
     };
   }
 

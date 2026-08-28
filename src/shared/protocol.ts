@@ -67,6 +67,14 @@ export interface Member {
   cushionMs?: number | null;
   /** Cumulative output frames this member's live ring could not fill. */
   underruns?: number | null;
+  /**
+   * Measured rate of this member's audio-context clock against wall time.
+   * 1.0 is a healthy device. Anything far from it means the OS audio stream
+   * under that context is broken (seen freewheeling at ~21x on Android): the
+   * device is silent, and every other number it reports was measured with a
+   * broken ruler -- the source must exclude it from steering.
+   */
+  ctxRate?: number | null;
 }
 
 /** `arming` = everyone is buffering; `scheduled` = deadline set, waiting for it. */
@@ -126,6 +134,7 @@ export type ClientMessage =
       marginMs?: number | null;
       cushionMs?: number | null;
       underruns?: number | null;
+      ctxRate?: number | null;
     }
   | { t: "cmd"; cmd: HostCommand };
 

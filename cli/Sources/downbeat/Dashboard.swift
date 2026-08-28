@@ -6,8 +6,16 @@ import Foundation
  Monochrome on purpose — bold, dim and inverse read correctly on light and
  dark terminals, and the QR keeps real black on real white, which a scanner
  needs. The layout is a single column that gives rows to the QR first, then
- the meter, speakers, telemetry and log, and drops from the bottom when the
- terminal is small.
+ the join line, telemetry, speakers and log, and drops from the bottom when
+ the terminal is small.
+
+ One rule above all others: NO LINE MAY EVER WRAP. A frame that prints one
+ more row than the terminal has scrolls the screen, the next frame homes to
+ a viewport that has moved, and within seconds the display is walking down
+ the terminal shredding itself. So every row is measured in visible cells —
+ not bytes, not `String.count`, and never a hand-maintained number that
+ drifts the first time a label changes — and clipped to the width that is
+ actually there.
  */
 struct MemberInfo: Sendable {
     let name: String
@@ -16,6 +24,10 @@ struct MemberInfo: Sendable {
     let sync: Double
     let cushionMs: Double?
     let playoutMs: Double?
+    /** Context-clock rate vs wall time as the device measured it; 1.0 is healthy. */
+    let ctxRate: Double?
+    /** Broken audio clock: silent device, excluded from budget steering. */
+    let clockBroken: Bool
 }
 
 struct DashboardState {
@@ -27,7 +39,6 @@ struct DashboardState {
     var joinHost = ""
     var qr: [[Bool]]? = nil
     var peakDb = -120.0
-    var levelsDb: [Double] = []
     var clockMs = Double.nan
     var synced = false
     var offline = false
@@ -49,7 +60,8 @@ enum Dashboard {
     private static let B = "\u{1b}[1m"
     private static let D = "\u{1b}[2m"
     private static let R = "\u{1b}[0m"
-    private static let glyphs: [Character] = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+    /// Only the render loop's thread touches this.
+    nonisolated(unsafe) private static var qrCache: (modules: Int, block: [String]) = (0, [])
 
     static func render(_ s: DashboardState) -> String {
         let (cols, rows) = Terminal.size()
@@ -59,37 +71,32 @@ enum Dashboard {
         let devices = s.members.count == 1 ? "1 SPEAKER" : "\(s.members.count) SPEAKERS"
         let right = "\(s.phase)   \(devices)   \(uptime(s.uptimeSec))"
         lines.append(pad("\(B)DOWNBEAT\(R)  \(D)\(s.source)\(R)",
-                         visible: 10 + s.source.count,
-                         right: (s.phaseBad ? B : "") + right + R,
-                         rightVisible: right.count, cols: cols))
+                         (s.phaseBad ? B : "") + right + R, cols: cols))
         lines.append(D + String(repeating: "─", count: max(0, cols)) + R)
 
-        // Join: the QR when it fits, always the code and address.
+        // Join: the QR when it fits, always the code and address. The block
+        // is wider than its module count — quiet zone and indent included —
+        // so measure the rendered thing, never a number derived from it.
+        // Rendered once: the code never changes for the life of the process,
+        // and re-emitting ~12 KB of colour escapes per frame bought nothing.
         if let qr = s.qr {
-            let qrRows = (qr.count + 1) / 2 + 2
-            if rows >= qrRows + 12 && cols >= qr.count + 4 {
-                lines.append(contentsOf: TerminalQR.render(qr).split(separator: "\n").map(String.init))
+            if qrCache.modules != qr.count {
+                qrCache = (qr.count, TerminalQR.render(qr).split(separator: "\n").map(String.init))
+            }
+            let block = qrCache.block
+            let qrCols = block.first.map(cells) ?? 0
+            if rows >= block.count + 11 && cols >= qrCols {
+                lines.append(contentsOf: block)
             }
         }
         lines.append("  \(B)\(s.code)\(R)   \(D)\(s.joinHost)\(R)")
         lines.append("")
 
-        // Level meter: one row of peaks, newest on the right.
-        let meterWidth = max(8, cols - 22)
-        var meter = ""
-        let recent = s.levelsDb.suffix(meterWidth)
-        for _ in 0..<(meterWidth - recent.count) { meter.append(" ") }
-        for db in recent {
-            let t = max(0.0, min(1.0, (db + 60) / 60))
-            meter.append(glyphs[Int((t * 8).rounded())])
-        }
-        let db = s.peakDb > -119 ? String(format: "%6.1f dBFS", s.peakDb) : "  -inf dBFS"
-        lines.append("  \(meter)  \(D)\(db)\(R)")
-        lines.append("")
-
-        // Telemetry: every number the sync engine steers by.
+        // Telemetry: the peak level first — proof the source is alive, one
+        // cell tall — then every number the sync engine steers by.
+        let db = s.peakDb > -119 ? String(format: "%.1f dBFS", s.peakDb) : "silent"
         let clock = s.offline ? "offline" : (s.synced ? String(format: "±%.1f ms", s.clockMs) : "syncing…")
-        var tele = "  clock \(clock) \(D)·\(R) buffer \(Int(s.bufferMs)) ms"
+        var tele = "  \(db) \(D)·\(R) clock \(clock) \(D)·\(R) buffer \(Int(s.bufferMs)) ms"
         if !s.cushionMs.isNaN { tele += " \(D)·\(R) cushion \(Int(s.cushionMs)) ms" }
         tele += String(format: " \(D)·\(R) timeline %+.1f ms", s.timelineErrMs)
         tele += String(format: " \(D)·\(R) %.0f kbit/s \(D)·\(R) %d pkts \(D)·\(R) underrun %d",
@@ -105,7 +112,14 @@ enum Dashboard {
             for m in s.members.prefix(6) {
                 var row = "   \(m.name)"
                 row += "  \(D)rtt\(R) \(Int(m.rtt)) ms  \(D)±\(R)\(String(format: "%.1f", m.sync)) ms"
-                if let c = m.cushionMs { row += "  \(D)cushion\(R) \(Int(c)) ms" }
+                if m.clockBroken {
+                    // A cushion of 45 minutes is not telemetry, it is a symptom.
+                    // Name the disease instead of printing the number.
+                    row += "  \(B)⚠ audio broken\(R)"
+                    if let r = m.ctxRate { row += " \(D)clock ×\(String(format: "%.1f", r))\(R)" }
+                } else if let c = m.cushionMs {
+                    row += "  \(D)cushion\(R) \(Int(c)) ms"
+                }
                 lines.append(row)
             }
         }
@@ -135,13 +149,14 @@ enum Dashboard {
         let keys = "\(B)q\(R)\(D) quit\(R)  \(B)m\(R)\(D) \(s.muted ? "unmute" : "mute")\(R)  \(B)±\(R)\(D) \(gain)\(R)  \(B)s\(R)\(D) source\(R)"
         let note = s.stopping ? "stopping — the source becomes audible again…"
                               : (s.muted ? "host muted" : "")
-        lines.append(pad(keys, visible: 24 + gain.count, right: D + note + R,
-                         rightVisible: note.count, cols: cols))
+        lines.append(pad(keys, D + note + R, cols: cols))
 
         // One frame, one write. \r\n because the terminal is in raw mode.
+        // Every row clipped: the terminal's auto-wrap is also disabled as a
+        // belt, but the frame must be correct on its own.
         var frame = "\u{1b}[H"
         for line in lines {
-            frame += line
+            frame += clip(line, cols)
             frame += "\u{1b}[K\r\n"
         }
         frame.removeLast(2)
@@ -149,9 +164,86 @@ enum Dashboard {
         return frame
     }
 
-    private static func pad(_ left: String, visible: Int, right: String,
-                            rightVisible: Int, cols: Int) -> String {
-        let gap = max(1, cols - visible - rightVisible - 1)
+    /* ---------------------------------------------------------- measuring */
+
+    /// Visible terminal cells in a string, ANSI escape sequences excluded.
+    static func cells(_ s: String) -> Int {
+        var n = 0
+        var esc = false, csi = false
+        for u in s.unicodeScalars {
+            if esc {
+                if csi {
+                    if (0x40...0x7e).contains(u.value) { esc = false }
+                } else if u == "[" {
+                    csi = true
+                } else {
+                    esc = false
+                }
+                continue
+            }
+            if u.value == 0x1b { esc = true; csi = false; continue }
+            n += width(u)
+        }
+        return n
+    }
+
+    /// Truncate to `max` visible cells. Escapes pass through unmeasured; a
+    /// reset is appended when anything was cut so styling cannot leak into
+    /// the erase-to-end that follows.
+    static func clip(_ s: String, _ max: Int) -> String {
+        var out = String.UnicodeScalarView()
+        var used = 0
+        var esc = false, csi = false
+        var cut = false
+        for u in s.unicodeScalars {
+            if esc {
+                out.append(u)
+                if csi {
+                    if (0x40...0x7e).contains(u.value) { esc = false }
+                } else if u == "[" {
+                    csi = true
+                } else {
+                    esc = false
+                }
+                continue
+            }
+            if u.value == 0x1b {
+                esc = true; csi = false
+                out.append(u)
+                continue
+            }
+            let w = width(u)
+            if used + w > max { cut = true; break }
+            used += w
+            out.append(u)
+        }
+        return cut ? String(out) + R : String(out)
+    }
+
+    /**
+     Terminal cells for one scalar: combining marks and joiners take none,
+     CJK and emoji take two, everything else one. Not a full wcwidth — it
+     does not need to be, because `clip` plus the disabled auto-wrap mean a
+     misjudged edge case costs a slightly short line, never a scroll.
+     */
+    private static func width(_ u: UnicodeScalar) -> Int {
+        switch u.value {
+        case 0x0300...0x036F, 0x1AB0...0x1AFF, 0x20D0...0x20FF,
+             0x200B...0x200F, 0xFE00...0xFE0F:
+            return 0
+        case 0x1100...0x115F, 0x2E80...0x9FFF, 0xA000...0xA4CF, 0xAC00...0xD7A3,
+             0xF900...0xFAFF, 0xFE30...0xFE4F, 0xFF00...0xFF60, 0xFFE0...0xFFE6,
+             0x1F300...0x1FAFF, 0x20000...0x3FFFD:
+            return 2
+        default:
+            return 1
+        }
+    }
+
+    /// Left text, right text, one row — widths measured, never hand-counted.
+    /// The last column stays free so the cursor can never push past the edge.
+    private static func pad(_ left: String, _ right: String, cols: Int) -> String {
+        let gap = max(1, cols - cells(left) - cells(right) - 2)
         return " " + left + String(repeating: " ", count: gap) + right
     }
 

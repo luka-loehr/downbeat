@@ -31,13 +31,20 @@ const REPORT_EVERY = 4800; // ~100 ms
 const TAU_SECONDS = 1.5;
 const TAU_INTEGRAL_SECONDS = 8;
 /**
- * 0.3 % is ~5 cents — inaudible on music, and the extra authority is the
- * point: crystal offset, receiver clock slew and the source's budget trim
- * must all fit under the ceiling SIMULTANEOUSLY, or the controller saturates,
- * ratchets to the recovery threshold and warbles.
+ * 0.5 % is ~9 cents — still under music's ~10-cent audibility threshold, and
+ * the extra authority is the point: crystal offset, the 2 ms/s receiver
+ * clock slew and the source's 2.5 ms/s budget trim must all fit under the
+ * ceiling SIMULTANEOUSLY, or the controller saturates, ratchets to the
+ * recovery threshold and warbles.
  */
-const MAX_RATE_DEVIATION = 0.003;
-const RECOVERY_RATE_DEVIATION = 0.01;
+const MAX_RATE_DEVIATION = 0.005;
+/**
+ * Recovery must outrun the source's 12 ms/s emergency budget growth plus the
+ * clock slew, or an underrun burst could never rebuild its cushion; 1.5 % is
+ * audible in principle, but only ever applied while the alternative is
+ * audible holes.
+ */
+const RECOVERY_RATE_DEVIATION = 0.015;
 const RECOVERY_THRESHOLD_S = 0.02;
 const HARD_RESYNC_S = 0.5; // beyond this, steering is hopeless
 
@@ -148,8 +155,12 @@ class LiveProcessor extends AudioWorkletProcessor {
     }
 
     if (this.upTo < 0 || !this.haveSync) {
+      // Silence, but not an underrun: playback has not started yet (or was
+      // reset for a re-anchor). Counting these frames handed every JOIN a
+      // huge cumulative "underrun" total, and the source reads any increase
+      // as an emergency and grows the whole room's latency by 300 ms.
+      // Underruns start meaning something once there is a stream to lose.
       for (let c = 0; c < out.length; c++) out[c].fill(0);
-      this.underruns += frames;
       return true;
     }
 

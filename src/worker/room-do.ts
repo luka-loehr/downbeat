@@ -35,6 +35,7 @@ interface Attach {
   marginMs: number | null;
   cushionMs: number | null;
   underruns: number | null;
+  ctxRate: number | null;
 }
 
 const EMPTY: Persisted = {
@@ -115,6 +116,7 @@ export class RoomDO implements DurableObject {
       marginMs: null,
       cushionMs: null,
       underruns: null,
+      ctxRate: null,
     };
     server.serializeAttachment(attach);
 
@@ -183,6 +185,7 @@ export class RoomDO implements DurableObject {
         a.marginMs = msg.marginMs ?? null;
         a.cushionMs = msg.cushionMs ?? null;
         a.underruns = msg.underruns ?? null;
+        a.ctxRate = msg.ctxRate ?? null;
         ws.serializeAttachment(a);
         this.broadcastStateSoon();
         return;

@@ -1,6 +1,7 @@
 import Foundation
 import CoreAudio
 import AudioToolbox
+import Synchronization
 
 /**
  Plays the captured stream back on this Mac, `bufferMs` behind capture, timed
@@ -24,13 +25,15 @@ import AudioToolbox
 private let TAU_S = 1.5
 /// Integral time constant; what drives a constant crystal offset to ZERO.
 private let TAU_INTEGRAL_S = 8.0
-/// Steady-state correction ceiling: 0.3 % is ~5 cents, inaudible on music,
-/// and -- same as the worklet -- leaves real authority for a budget trim,
-/// clock slew and crystal offset landing at once. A ceiling exactly equal to
-/// the trim rate saturates, ratchets to the recovery threshold and warbles.
-private let MAX_RATE_DEV = 0.003
-/// After a real dislocation, pull harder rather than be out of step for a minute.
-private let RECOVERY_RATE_DEV = 0.01
+/// Steady-state correction ceiling: 0.5 % is ~9 cents, still under music's
+/// ~10-cent audibility threshold, and -- same as the worklet -- leaves real
+/// authority for the 2.5 ms/s budget trim, 2 ms/s clock slew and crystal
+/// offset landing at once. A ceiling merely equal to their sum saturates,
+/// ratchets to the recovery threshold and warbles.
+private let MAX_RATE_DEV = 0.005
+/// After a real dislocation -- or the 12 ms/s emergency budget growth --
+/// pull harder rather than be out of step (or crackling) for a minute.
+private let RECOVERY_RATE_DEV = 0.015
 private let RECOVERY_THRESHOLD_S = 0.020
 /// Beyond this, steering is hopeless -- jump once and count it honestly.
 private let HARD_RESYNC_S = 0.5
@@ -63,9 +66,16 @@ final class LocalPlayer {
 
     /// Local monotonic time that capture frame 0 corresponds to. Set once by
     /// the tap. Deliberately not in room time: the clock offset keeps moving,
-    /// and an anchor expressed in room time would move with it.
-    var anchorLocalMs: Double = 0
-    var anchored = false
+    /// and an anchor expressed in room time would move with it. The pair is
+    /// release/acquire ordered: the IO proc runs on another core, and seeing
+    /// `anchored` without the anchor would play from local time zero.
+    private let anchorBits = Atomic<UInt64>(0)
+    private let anchoredFlag = Atomic<Bool>(false)
+    var anchored: Bool { anchoredFlag.load(ordering: .acquiring) }
+    func setAnchor(localMs: Double) {
+        anchorBits.store(localMs.bitPattern, ordering: .relaxed)
+        anchoredFlag.store(true, ordering: .releasing)
+    }
     /**
      How far the nominal-rate timeline has drifted from the capture device's
      real progress, in ms. Read from the realtime IO proc, so it must be a
@@ -160,8 +170,9 @@ final class LocalPlayer {
 
             // When will these samples actually be heard? Local domain on both
             // sides, so the room-clock offset cancels out entirely.
+            let anchorMs = Double(bitPattern: self.anchorBits.load(ordering: .relaxed))
             let outLocalMs = RoomClock.localMs(hostTime: inOutputTime.pointee.mHostTime)
-            let want = (outLocalMs - self.bufferMs - self.anchorLocalMs - self.correctionMs) / 1000 * rate
+            let want = (outLocalMs - self.bufferMs - anchorMs - self.correctionMs) / 1000 * rate
 
             if !self.reading {
                 self.readPos = want

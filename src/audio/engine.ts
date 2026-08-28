@@ -1,6 +1,11 @@
 import type { SyncedClock } from "./clock";
 import { clamp, median } from "./clock";
-import { loadDeviceOffset, outputLatency, saveDeviceOffset } from "./latency";
+import {
+  loadDeviceOffset,
+  outputLatency,
+  plausibleOutputTimestamp,
+  saveDeviceOffset,
+} from "./latency";
 import { LIVE_HEADER_BYTES } from "../shared/protocol";
 import { WORKLET_VERSION } from "../shared/build";
 
@@ -308,11 +313,9 @@ export class PlaybackEngine {
    * -- we fall back to `currentTime` plus the reported output latency.
    */
   private captureMap(): { ctxRef: number; roomRef: number } {
-    const ts = this.ctx.getOutputTimestamp?.();
-    const tsCtx = ts?.contextTime;
-    const tsPerf = ts?.performanceTime;
-    if (typeof tsCtx === "number" && typeof tsPerf === "number" && tsCtx > 0 && tsPerf > 0) {
-      return { ctxRef: tsCtx, roomRef: this.clock.toRoom(tsPerf) };
+    const ts = plausibleOutputTimestamp(this.ctx);
+    if (ts) {
+      return { ctxRef: ts.contextTime, roomRef: this.clock.toRoom(ts.performanceTime) };
     }
     return {
       ctxRef: this.ctx.currentTime,
@@ -920,10 +923,10 @@ export class LivePlayer {
         this.requestJump = true;
         this.reseedMargin = true;
       } else {
-        // 0.25 ms per packet is 12.5 ms/s -- comfortably above everything the
-        // source is allowed to do to the stamps (1 ms/s trim, 6 ms/s growth,
-        // 2 ms/s clock slew), yet far below audibility.
-        this.timelineDriftMs += clamp(residual - this.timelineDriftMs, -0.25, 0.25);
+        // 0.4 ms per packet is 20 ms/s -- comfortably above everything the
+        // source is allowed to do to the stamps (2.5 ms/s trim, 12 ms/s
+        // growth, 2 ms/s clock slew), yet far below audibility.
+        this.timelineDriftMs += clamp(residual - this.timelineDriftMs, -0.4, 0.4);
       }
     }
 
@@ -981,12 +984,10 @@ export class LivePlayer {
 
   /** Keep `k` tracking the real relationship between the two clocks. */
   private trackMapping(): void {
-    const ts = this.ctx.getOutputTimestamp?.();
-    const tsCtx = ts?.contextTime;
-    const tsPerf = ts?.performanceTime;
+    const ts = plausibleOutputTimestamp(this.ctx);
     let sample: number;
-    if (typeof tsCtx === "number" && typeof tsPerf === "number" && tsCtx > 0 && tsPerf > 0) {
-      sample = tsCtx - this.clock.toRoom(tsPerf) / 1000;
+    if (ts) {
+      sample = ts.contextTime - this.clock.toRoom(ts.performanceTime) / 1000;
     } else {
       sample = this.ctx.currentTime - (this.clock.now() + outputLatency(this.ctx) * 1000) / 1000;
     }

@@ -27,6 +27,35 @@ export function outputLatency(ctx: AudioContext): number {
 }
 
 /**
+ * `getOutputTimestamp()`, but only when it is telling a plausible story.
+ *
+ * `contextTime` names a sample that has already been rendered, so it can only
+ * TRAIL `currentTime` -- by roughly the output latency -- and `performanceTime`
+ * says when that sample reaches the speaker, so it must sit near now. Broken
+ * Android audio stacks hand back pairs that violate both, and a clock mapping
+ * seeded from one is not slightly wrong but unrecoverable: every device
+ * steering by it is silently kilometres from the room. When the pair is
+ * implausible, act as if the API were not implemented at all -- the
+ * `currentTime` + `outputLatency` fallback is coarser but cannot lie this big.
+ */
+const MAX_CONTEXT_LAG_S = 2;
+const MAX_CONTEXT_LEAD_S = 0.05;
+const MAX_PERF_SKEW_MS = 2000;
+
+export function plausibleOutputTimestamp(
+  ctx: AudioContext,
+): { contextTime: number; performanceTime: number } | null {
+  const ts = ctx.getOutputTimestamp?.();
+  const c = ts?.contextTime;
+  const p = ts?.performanceTime;
+  if (typeof c !== "number" || typeof p !== "number" || c <= 0 || p <= 0) return null;
+  const behind = ctx.currentTime - c;
+  if (behind < -MAX_CONTEXT_LEAD_S || behind > MAX_CONTEXT_LAG_S) return null;
+  if (Math.abs(p - performance.now()) > MAX_PERF_SKEW_MS) return null;
+  return { contextTime: c, performanceTime: p };
+}
+
+/**
  * A stable-enough key for "this device with this output path". Changing the
  * output route (speaker -> headphones -> Bluetooth) changes latency, so the
  * sample rate is folded in: switching route usually changes it.
