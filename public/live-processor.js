@@ -17,8 +17,9 @@
  * Control-buffer layout (mirrored in src/audio/engine.ts — keep in step):
  *   Int32  [0] sync seqlock    guards f64[0..1]: syncFrame (ctx), syncRing (stream)
  *   Int32  [1] writer seqlock  guards f64[2..3]: upTo, from (stream samples)
- *   Int32  [2] stats seqlock   guards f64[4..9]: underruns, minAhead,
- *                              errFrames, rate, resyncs, publish counter
+ *   Int32  [2] stats seqlock   guards f64[4..10]: underruns, minAhead,
+ *                              errFrames, rate, resyncs, publish counter,
+ *                              currentFrame at publish
  *   Int32  [3] jump counter    main increments; we snap once per change
  *   Int32  [4] stats ack       main increments after reading; resets minAhead
  *   Float64 block starts at byte 64.
@@ -242,6 +243,9 @@ class LiveProcessor extends AudioWorkletProcessor {
       this.f64[7] = this.rate;
       this.f64[8] = this.resyncs;
       this.f64[9] = this.published;
+      // Our clock, for the main thread to hold against its own: the two
+      // halves of one context disagreeing by seconds is a real fault.
+      this.f64[10] = base + frames;
       Atomics.add(this.ctl, SEQ_STATS, 1);
     }
     return true;

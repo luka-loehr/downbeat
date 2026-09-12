@@ -336,14 +336,17 @@ final class Transport: NSObject, @unchecked Sendable {
             // tick and pins the whole room at maximum latency; its cushion is
             // fiction in whichever direction the clock broke. Steer only by
             // the healthy devices, and let the dashboard show the sick one.
-            // The cushion bound also catches clients from before ctxRate
-            // existed: no genuine ring holds a minute of audio.
-            func clockBroken(_ m: [String: Any]) -> Bool {
-                if let r = m["ctxRate"] as? Double, abs(r - 1) > 0.1 { return true }
-                if let c = m["cushionMs"] as? Double, c > 60_000 { return true }
-                return false
+            // A cushion beyond a minute is the other face of the same fault:
+            // the clock's RATE is fine but its read head has lost the stream
+            // (no genuine ring holds a minute of audio), and `stuck` is the
+            // device's own verdict that it has tried re-anchoring and failed.
+            func fault(_ m: [String: Any]) -> AudioFault? {
+                if let r = m["ctxRate"] as? Double, abs(r - 1) > 0.1 { return .clock(rate: r) }
+                if let c = m["cushionMs"] as? Double, c > 60_000 { return .cushion(ms: c) }
+                if m["stuck"] as? Bool == true { return .stuck }
+                return nil
             }
-            let healthy = speakers.filter { !clockBroken($0) }
+            let healthy = speakers.filter { fault($0) == nil }
 
             var spread = 0.0
             let playouts = healthy.compactMap { $0["playoutMs"] as? Double }
@@ -389,7 +392,7 @@ final class Transport: NSObject, @unchecked Sendable {
                     cushionMs: m["cushionMs"] as? Double,
                     playoutMs: m["playoutMs"] as? Double,
                     ctxRate: m["ctxRate"] as? Double,
-                    clockBroken: clockBroken(m))
+                    fault: fault(m))
             }
             onMembers?(MemberSnapshot(count: speakers.count, spreadMs: spread, members: infos))
         }

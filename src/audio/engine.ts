@@ -8,6 +8,7 @@ import {
 } from "./latency";
 import { LIVE_HEADER_BYTES } from "../shared/protocol";
 import { WORKLET_VERSION } from "../shared/build";
+import { DislocationGuard } from "./dislocation";
 
 /**
  * PlaybackEngine -- decode ahead of time, start on a shared instant, then hold
@@ -466,6 +467,13 @@ const CTL_JUMP = 3;
 const CTL_ACK = 4;
 const F64_BASE = 64;
 const STATS_POLL_MS = 250;
+/**
+ * Consecutive late packets that mean "this device is a long way ahead of the
+ * stream", not "the network hiccuped". Packets are 20 ms, so this is 5 s
+ * without a single packet landing before its instant -- a stall that long is
+ * already broken audio, and a re-anchor costs nothing it has not lost.
+ */
+const LATE_STREAK_DISLOCATED = 250;
 
 /**
  * Live playback: a continuous stream from a Downbeat CLI instead of a file.
@@ -506,6 +514,19 @@ export interface LiveStats {
   rate: number;
   /** Packets skipped while waiting for the clock to converge. */
   waiting: number;
+  /**
+   * Times the ring reported the impossible -- a cushion no ring can hold, or
+   * seconds of nothing but late packets -- and the mapping was thrown away
+   * and rebuilt from the next packet. See DislocationGuard.
+   */
+  dislocations: number;
+  /**
+   * The worklet's `currentFrame` against the main thread's `currentTime`, ms,
+   * as of the last stats report. Tens of ms of poll lag is normal; seconds
+   * means the two halves of one AudioContext disagree about what time it is,
+   * which is the fault the dislocation guard exists for.
+   */
+  clockSkewMs: number;
 }
 
 /**
@@ -665,10 +686,14 @@ export class LivePlayer {
   /** Re-seed the margin EMA on the next packet -- after a dislocation the
    *  history describes a world that no longer exists. */
   private reseedMargin = false;
+  /** Judges impossible ring reports; orders re-anchors, then gives up. */
+  private guard = new DislocationGuard();
+  /** Consecutive packets dropped as late; any on-time packet resets it. */
+  private lateStreak = 0;
 
   private stats: LiveStats = {
     decoded: 0, late: 0, marginMs: 0, underruns: 0, aheadMs: 0, cushionMs: null,
-    anchorErrorMs: 0, reanchors: 0, rate: 1, waiting: 0,
+    anchorErrorMs: 0, reanchors: 0, rate: 1, waiting: 0, dislocations: 0, clockSkewMs: 0,
   };
 
   constructor(
@@ -685,6 +710,15 @@ export class LivePlayer {
 
   get running(): boolean {
     return this.source !== null;
+  }
+
+  /**
+   * The ring kept reporting the impossible through repeated re-anchors: the
+   * clocks this device measures with are lying, and only a rebuilt audio
+   * stack -- which needs a user gesture -- can help. The UI shows the tap.
+   */
+  get stuck(): boolean {
+    return this.guard.stuck;
   }
 
   get liveConfig(): LiveConfig | null {
@@ -727,7 +761,7 @@ export class LivePlayer {
     this.config = config;
     this.stats = {
       decoded: 0, late: 0, marginMs: 0, underruns: 0, aheadMs: 0, cushionMs: null,
-      anchorErrorMs: 0, reanchors: 0, rate: 1, waiting: 0,
+      anchorErrorMs: 0, reanchors: 0, rate: 1, waiting: 0, dislocations: 0, clockSkewMs: 0,
     };
     this.kInit = false;
     this.anchored = false;
@@ -736,6 +770,8 @@ export class LivePlayer {
     this.kOutliers = [];
     this.requestJump = false;
     this.reseedMargin = false;
+    this.guard.reset();
+    this.lateStreak = 0;
 
     // Live audio travels to the output thread through shared memory: zero
     // copies, zero message ports, immune to main-thread jank. This needs
@@ -832,6 +868,7 @@ export class LivePlayer {
       const rate = f64[7];
       const resyncs = f64[8];
       const publish = f64[9];
+      const workletFrame = f64[10];
       if (Atomics.load(ctl, SEQ_STATS) !== s1) continue;
 
       const streamRate = config.sampleRate;
@@ -841,6 +878,8 @@ export class LivePlayer {
       this.resyncs = resyncs;
       if (publish !== this.lastPublish) {
         this.lastPublish = publish;
+        this.stats.clockSkewMs =
+          (this.ctx.currentTime - workletFrame / this.ctx.sampleRate) * 1000;
         if (minAhead >= 0) {
           this.aheadWindow.push(minAhead);
           // ~2 s of window: long enough to catch a jitter burst, short
@@ -851,8 +890,58 @@ export class LivePlayer {
         // Tell the worklet its dip window was consumed; it starts a new one.
         Atomics.add(ctl, CTL_ACK, 1);
       }
+      this.judge(minAhead);
       return;
     }
+  }
+
+  /**
+   * The ring cannot hold more than RING_FRAMES, so a read head reporting
+   * more audio ahead than that is not buffering, it is outside the window
+   * and rendering silence. The mirror fault -- every packet late for
+   * seconds -- means the read head is ahead of anything that will ever be
+   * written. Neither is something the steering loops can walk off: their
+   * authority is 1.5 % of real time, and the error is tens of seconds.
+   */
+  private judge(minAhead: number): void {
+    const implausible =
+      (this.anchored && minAhead > RING_FRAMES) ||
+      this.lateStreak >= LATE_STREAK_DISLOCATED;
+    const verdict = this.guard.report(implausible);
+    if (verdict === "ok") return;
+    const streamRate = this.config?.sampleRate ?? 48000;
+    console.warn(
+      `[downbeat] live ring dislocated: cushion ${Math.round((minAhead / streamRate) * 1000)} ms,` +
+        ` late streak ${this.lateStreak}, worklet skew ${Math.round(this.stats.clockSkewMs)} ms,` +
+        ` k ${this.k.toFixed(3)} -> ${verdict}`,
+    );
+    this.dislocate();
+  }
+
+  /**
+   * Throw the mapping and the anchor away and let the next packet establish
+   * both from fresh measurements. The ring's recorded extent describes audio
+   * placed under the old mapping, so retire it now rather than leave the
+   * worklet reading stale samples until the next packet lands.
+   */
+  private dislocate(): void {
+    this.kInit = false;
+    this.kOutliers = [];
+    this.anchored = false;
+    this.timelineDriftMs = 0;
+    this.aheadWindow = [];
+    this.lateStreak = 0;
+    this.reseedMargin = true;
+    this.stats.dislocations++;
+    this.upTo = -1;
+    this.ringFrom = 0;
+    this.writePair(SEQ_WRITE, 2, -1, 0);
+    // The room-clock offset is the one input the re-anchor would otherwise
+    // inherit, and every packet arriving a minute late is exactly what a
+    // wrong offset looks like. Re-measuring it needs no gesture and costs a
+    // burst of probes; the anchor waits for it.
+    this.clock.reset();
+    this.clock.start();
   }
 
   /** Feed one wire frame: play instant, sample index, then the Opus packet. */
@@ -891,8 +980,10 @@ export class LivePlayer {
     if (margin < -200) {
       // Far past its moment. Writing it would only stamp on newer audio.
       this.stats.late++;
+      this.lateStreak++;
       return;
     }
+    this.lateStreak = 0;
 
     const streamRate = this.config?.sampleRate ?? this.ctx.sampleRate;
     // Where the room clock says this sample belongs, right now -- in STREAM

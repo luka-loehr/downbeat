@@ -75,6 +75,13 @@ export interface Member {
    * broken ruler -- the source must exclude it from steering.
    */
   ctxRate?: number | null;
+  /**
+   * This member is showing its tap-to-fix prompt: its audio stack is broken
+   * in a way the page has already tried and failed to repair on its own
+   * (freewheeling clock, or a ring that kept dislocating through re-anchors),
+   * and only a user gesture on that device can rebuild it.
+   */
+  stuck?: boolean;
 }
 
 /** `arming` = everyone is buffering; `scheduled` = deadline set, waiting for it. */
@@ -135,6 +142,7 @@ export type ClientMessage =
       cushionMs?: number | null;
       underruns?: number | null;
       ctxRate?: number | null;
+      stuck?: boolean;
     }
   | { t: "cmd"; cmd: HostCommand };
 

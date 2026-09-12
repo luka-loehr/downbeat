@@ -26,8 +26,30 @@ struct MemberInfo: Sendable {
     let playoutMs: Double?
     /** Context-clock rate vs wall time as the device measured it; 1.0 is healthy. */
     let ctxRate: Double?
-    /** Broken audio clock: silent device, excluded from budget steering. */
-    let clockBroken: Bool
+    /**
+     * Why this device is silent, or nil when it is healthy. A faulted device
+     * is excluded from budget steering; the dashboard names the fault.
+     */
+    let fault: AudioFault?
+}
+
+/** The ways a speaker's numbers stop meaning anything. */
+enum AudioFault: Equatable, Sendable {
+    /** Its audio-context clock runs at the wrong speed: the OS stream is dead. */
+    case clock(rate: Double)
+    /** It claims more audio ahead of the play head than its ring can hold. */
+    case cushion(ms: Double)
+    /** It has given up and is showing its tap-to-fix prompt. */
+    case stuck
+
+    /** Short form for a dashboard row: what and how much. */
+    var detail: String {
+        switch self {
+        case .clock(let r): return String(format: "clock ×%.1f", r)
+        case .cushion(let ms): return String(format: "cushion %.0f s", ms / 1000)
+        case .stuck: return "needs a tap"
+        }
+    }
 }
 
 struct DashboardState {
@@ -112,11 +134,11 @@ enum Dashboard {
             for m in s.members.prefix(6) {
                 var row = "   \(m.name)"
                 row += "  \(D)rtt\(R) \(Int(m.rtt)) ms  \(D)±\(R)\(String(format: "%.1f", m.sync)) ms"
-                if m.clockBroken {
+                if let fault = m.fault {
                     // A cushion of 45 minutes is not telemetry, it is a symptom.
                     // Name the disease instead of printing the number.
-                    row += "  \(B)⚠ audio broken\(R)"
-                    if let r = m.ctxRate { row += " \(D)clock ×\(String(format: "%.1f", r))\(R)" }
+                    let what = fault == .stuck ? "audio stuck" : "audio broken"
+                    row += "  \(B)⚠ \(what)\(R) \(D)\(fault.detail)\(R)"
                 } else if let c = m.cushionMs {
                     row += "  \(D)cushion\(R) \(Int(c)) ms"
                 }

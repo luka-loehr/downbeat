@@ -154,8 +154,13 @@ export class RoomConnection {
     if (this.watchdogTimer === null) {
       this.watchdogTimer = setInterval(() => {
         this.watchdog.sample(this.ctx?.state === "running");
-        if (this.watchdog.broken !== this.audioBroken) {
-          this.audioBroken = this.watchdog.broken;
+        // Two ways for a device to be silent with healthy-looking numbers:
+        // the context clock freewheeling (watchdog), or the ring lost to a
+        // mapping the page has already tried and failed to rebuild (guard).
+        // Both end in the same tap.
+        const broken = this.watchdog.broken || (this.live?.stuck ?? false);
+        if (broken !== this.audioBroken) {
+          this.audioBroken = broken;
           this.emit();
         }
       }, WATCHDOG_SAMPLE_MS);
@@ -189,6 +194,14 @@ export class RoomConnection {
     // close, and Chrome caps live contexts, so release the slot in parallel.
     if (old) void old.close().catch(() => {});
     await this.buildAudio();
+    // The room-clock offset is the one measurement the rebuild above does
+    // not touch, and a device that got here through the dislocation guard
+    // may have been steering by a wrong one. Start it over too; the burst
+    // costs a second of silence, which is nothing next to being stuck.
+    if (this.connected) {
+      this.clock.reset();
+      this.clock.start();
+    }
     this.emit();
     await this.reconcile();
   }
@@ -519,6 +532,9 @@ export class RoomConnection {
       // measured with a broken ruler, and the source must not steer by them.
       ctxRate:
         this.watchdog.rate === null ? null : Math.round(this.watchdog.rate * 100) / 100,
+      // This device is showing the tap-to-fix prompt: it has stopped trying
+      // to steer itself, and the host should say so rather than guess.
+      stuck: this.audioBroken,
     });
   }
 

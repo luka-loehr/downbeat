@@ -285,18 +285,37 @@ final class RosterWatch: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         var next: [String: MemberInfo] = [:]
         for m in members { next[m.name] = m }
+        // One line per change of KIND, not of value: a cushion drifting from
+        // 63 s to 64 s is the same fault, not news.
+        func kind(_ f: AudioFault?) -> Int {
+            switch f {
+            case nil: return 0
+            case .clock: return 1
+            case .cushion: return 2
+            case .stuck: return 3
+            }
+        }
+        func describe(_ name: String, _ f: AudioFault) -> String {
+            switch f {
+            case .clock(let r):
+                return String(format: "⚠ %@: audio clock broken (×%.1f) — not steering by it", name, r)
+            case .cushion(let ms):
+                return String(format: "⚠ %@: audio lost the stream (cushion %.0f s) — not steering by it", name, ms / 1000)
+            case .stuck:
+                return "⚠ \(name): audio stuck — needs a tap on that phone"
+            }
+        }
         for (name, m) in next {
             guard let old = known[name] else {
                 log.add("\(name) joined")
-                if m.clockBroken { log.add("⚠ \(name): audio clock broken — not steering by it") }
+                if let f = m.fault { log.add(describe(name, f)) }
                 continue
             }
-            if m.clockBroken != old.clockBroken {
-                if m.clockBroken {
-                    let rate = m.ctxRate.map { String(format: " (×%.1f)", $0) } ?? ""
-                    log.add("⚠ \(name): audio clock broken\(rate) — not steering by it")
+            if kind(m.fault) != kind(old.fault) {
+                if let f = m.fault {
+                    log.add(describe(name, f))
                 } else {
-                    log.add("\(name): audio clock recovered")
+                    log.add("\(name): audio recovered")
                 }
             }
         }
