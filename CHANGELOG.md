@@ -3,6 +3,18 @@
 All notable changes to this project, with the conditions under which each
 measurement was taken.
 
+## [Unreleased]
+
+### Changed
+- The CLI has no built-in default server. Set `DOWNBEAT_URL` (or pass `--url`)
+  to your own deployment; without it, `login`, `logout` and `host` exit with an
+  explanation. `--offline` needs no server.
+- `wrangler.jsonc` is no longer committed. Copy `wrangler.example.jsonc`; the
+  deploy workflow generates it from the `D1_DATABASE_ID` secret and the
+  optional `WORKER_ROUTE` variable.
+- The README is shorter; technical detail moved to `docs/ARCHITECTURE.md` and
+  `docs/SELF-HOSTING.md`.
+
 ## [0.4.0] — 2026-08-26
 
 Fully native. One Swift binary on the Mac; shared memory to the speaker in
@@ -24,7 +36,7 @@ the browser. A hard cutover: nothing of the old two-process design remains.
   off the render thread entirely. Pages are served cross-origin isolated
   (COOP/COEP) to make shared memory legal; every current Safari, Chrome and
   Firefox qualifies.
-- The capture path's peak scan and clamp are vDSP (Accelerate): vectorised,
+- The capture path's peak scan and clamp are vDSP (Accelerate): vectorized,
   allocation-free, realtime-safe.
 - `install.sh` and the release package ship exactly one file.
 
@@ -105,7 +117,7 @@ timeline instead of a first impression of it.
 - Only a verified source socket may inject binary audio into a room; any
   listener could previously stream into the relay path.
 - Browser reconnects are jittered so a room full of phones dropped by one
-  outage does not stampede back in a single synchronised wave, and a
+  outage does not stampede back in a single synchronized wave, and a
   WebSocket constructor that throws no longer ends the retry chain.
 
 ## [0.2.2] — 2026-08-26
@@ -177,14 +189,14 @@ into itself.
 - A stalled network can no longer queue unbounded audio in the CLI transport:
   past ~2.5 s of backlog, packets are dropped and counted rather than
   delivered too late to be played.
-- Zeroing a ring hole after a long outage is bounded and vectorised in the
+- Zeroing a ring hole after a long outage is bounded and vectorized in the
   worklet, so a listener returning from minutes offline cannot glitch the
   render thread.
 
 ### Changed
 - Room state broadcasts are coalesced to at most one per 750 ms for telemetry,
   joins and leaves. With N devices each reporting every two seconds the old
-  behaviour was N²/2 member-entries per second across the room — the actual
+  behavior was N²/2 member-entries per second across the room — the actual
   ceiling on room size. Transport changes still broadcast immediately.
 - The last German strings in the terminal UI and CLI are English.
 
@@ -246,7 +258,7 @@ Zero steady-state drift, runtime control, and every browser.
 
 ## [0.1.0] — 2026-08-23
 
-First working system: file playback and live capture, both synchronised.
+First working system: file playback and live capture, both synchronized.
 
 ### Added
 - Room clock over Durable Object WebSockets (Cristian's algorithm, min-RTT
