@@ -20,4 +20,5 @@ echo
 echo "Installed:"
 echo "  $PREFIX/downbeat"
 echo
-echo "Next:  downbeat login   then   downbeat host"
+echo "Next:  export DOWNBEAT_URL=https://your-deployment.example.com"
+echo "       downbeat login   then   downbeat host"

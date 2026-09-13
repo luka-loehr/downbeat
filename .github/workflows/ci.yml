@@ -16,6 +16,8 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - name: Use the example Wrangler config
+        run: cp wrangler.example.jsonc wrangler.jsonc
       - name: Generate binding types
         run: npx wrangler types
       - name: Typecheck

@@ -7,7 +7,7 @@ import Vision
  A QR code drawn straight into the terminal, so joining is "point camera at the
  laptop" instead of "type six characters".
 
- Two details decide whether a phone can actually read it. Colours are written
+ Two details decide whether a phone can actually read it. Colors are written
  explicitly with ANSI escapes rather than relying on the terminal's theme -- on
  a dark background an unstyled code is inverted, which many scanners refuse.
  And each character carries two rows via a half-block, because a QR drawn one

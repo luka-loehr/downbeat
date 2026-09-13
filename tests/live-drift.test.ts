@@ -118,7 +118,7 @@ describe("live drift controller", () => {
       readPos += BLOCK * steer(err);
       target += BLOCK * (1 + 50e-6);
     }
-    // Measured behaviour: 100 ms -> ~1 ms by 20 s, sub-millisecond by 40 s.
+    // Measured behavior: 100 ms -> ~1 ms by 20 s, sub-millisecond by 40 s.
     expect(at[10]).toBeLessThan(20);
     expect(at[20]).toBeLessThan(2);
     expect(at[40]).toBeLessThan(0.5);

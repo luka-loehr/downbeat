@@ -294,7 +294,7 @@ export class RoomConnection {
     // Backoff, but never past a few seconds: this has to recover on its own
     // while the phone is in someone's pocket, with nobody there to retry.
     // Jittered, so a room full of phones dropped by the same outage does not
-    // stampede back through the door in one synchronised wave.
+    // stampede back through the door in one synchronized wave.
     const delay =
       Math.min(RECONNECT_BASE_MS * 2 ** this.attempt, RECONNECT_MAX_MS) *
       (0.5 + Math.random() * 0.5);

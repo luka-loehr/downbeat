@@ -606,7 +606,7 @@ class OpusSource {
     if (!this.wasm) return;
     try {
       // Synchronous, so a slow frame stalls the socket handler rather than
-      // silently queueing -- which is the behaviour we want, since a device
+      // silently queueing -- which is the behavior we want, since a device
       // that cannot keep up should show underruns, not unbounded latency.
       const out = this.wasm.decodeFrame(packet);
       if (out.channelData?.length) this.onDecoded(out.channelData, sampleIndex);
@@ -954,7 +954,7 @@ export class LivePlayer {
     const playAt = view.getFloat64(0, true);
     const sampleIndex = view.getFloat64(8, true);
 
-    // Do not anchor -- or even initialise the mapping -- on a clock that has
+    // Do not anchor -- or even initialize the mapping -- on a clock that has
     // not converged. The first probes land over the opening second, and a
     // binary frame can beat the first pong to this handler; `toRoom` is then
     // wrong by the entire room offset, and `k` slews far too slowly to ever

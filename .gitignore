@@ -17,3 +17,9 @@ cli/dist/
 
 # Rust build output from the cloud-source branch
 source/target/
+
+# Deployment config with your own D1 id and route; copy wrangler.example.jsonc
+wrangler.jsonc
+
+# TypeScript incremental build info
+*.tsbuildinfo

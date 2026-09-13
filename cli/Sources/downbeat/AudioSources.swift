@@ -44,7 +44,7 @@ enum AudioSources {
             guard let pid = pid(of: object), pid > 0, pid != own, !seen.contains(pid)
             else { continue }
             seen.insert(pid)
-            // Only things a person would recognise as an app. Media helpers
+            // Only things a person would recognize as an app. Media helpers
             // report names like "2.1.241-c50", and capturing our own output
             // would be a feedback loop -- neither belongs in a picker.
             guard let app = NSRunningApplication(processIdentifier: pid),

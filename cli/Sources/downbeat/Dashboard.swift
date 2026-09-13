@@ -100,7 +100,7 @@ enum Dashboard {
         // is wider than its module count — quiet zone and indent included —
         // so measure the rendered thing, never a number derived from it.
         // Rendered once: the code never changes for the life of the process,
-        // and re-emitting ~12 KB of colour escapes per frame bought nothing.
+        // and re-emitting ~12 KB of color escapes per frame bought nothing.
         if let qr = s.qr {
             if qrCache.modules != qr.count {
                 qrCache = (qr.count, TerminalQR.render(qr).split(separator: "\n").map(String.init))

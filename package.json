@@ -3,7 +3,7 @@
   "version": "0.4.0",
   "private": true,
   "type": "module",
-  "description": "Millisecond-exact multi-device music synchronisation over the web.",
+  "description": "Synchronized multi-device music playback over the web, hosted from a Mac.",
   "scripts": {
     "dev": "vite",
     "build": "node scripts/build-id.mjs && tsc -b --noEmit && vite build",

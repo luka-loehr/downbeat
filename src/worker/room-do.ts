@@ -99,7 +99,7 @@ export class RoomDO implements DurableObject {
     // Hibernation: the DO can be evicted between messages and revived on the
     // next one without dropping sockets, so an idle room costs nothing.
     //
-    // The tags matter for live audio: at 50 packets a second, deserialising
+    // The tags matter for live audio: at 50 packets a second, deserializing
     // every socket's attachment just to find out who to forward to would be
     // the most expensive thing this object does. Tagging at accept time makes
     // the relay a single indexed lookup.

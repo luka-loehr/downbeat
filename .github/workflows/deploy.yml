@@ -20,6 +20,28 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      # wrangler.jsonc is not committed. It is generated from the example with
+      # the repository secret D1_DATABASE_ID and the optional repository
+      # variable WORKER_ROUTE (a hostname on your zone; empty = workers.dev only).
+      - name: Write wrangler.jsonc
+        env:
+          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+          WORKER_ROUTE: ${{ vars.WORKER_ROUTE }}
+        run: |
+          if [ -z "$D1_DATABASE_ID" ]; then
+            echo "::error::Set the D1_DATABASE_ID repository secret (see docs/SELF-HOSTING.md)"
+            exit 1
+          fi
+          node -e '
+            const fs = require("fs");
+            let s = fs.readFileSync("wrangler.example.jsonc", "utf8");
+            s = s.replace("<your-d1-database-id>", process.env.D1_DATABASE_ID);
+            const route = process.env.WORKER_ROUTE;
+            s = route
+              ? s.replace("downbeat.example.com", route)
+              : s.replace(/^\s*"routes":.*\n/m, "");
+            fs.writeFileSync("wrangler.jsonc", s);
+          '
       - run: npx wrangler types
       - run: npm run typecheck
       - run: npm test

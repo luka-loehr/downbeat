@@ -1,3 +1,6 @@
+// Copy to wrangler.jsonc (gitignored) and fill in your own values:
+//   cp wrangler.example.jsonc wrangler.jsonc
+// See docs/SELF-HOSTING.md.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "downbeat",
@@ -25,12 +28,14 @@
     {
       "binding": "DB",
       "database_name": "downbeat-sessions",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "<your-d1-database-id>",
       "migrations_dir": "migrations"
     }
   ],
   "triggers": { "crons": ["17 * * * *"] },
-  "routes": [{ "pattern": "downbeat.lukaloehr.com", "custom_domain": true }],
+  // Optional: serve on a hostname in a zone you control. Remove this line to
+  // use only the *.workers.dev URL.
+  "routes": [{ "pattern": "downbeat.example.com", "custom_domain": true }],
   "workers_dev": true,
   "preview_urls": false,
   "observability": { "enabled": true },

@@ -78,7 +78,7 @@ describe("room codes", () => {
   });
 });
 
-describe("code normalisation", () => {
+describe("code normalization", () => {
   it("accepts the glyphs people substitute when reading aloud", () => {
     // The alphabet drops I, L, O and U because they are confusable; that only
     // helps if someone who types the confusable one still gets in.

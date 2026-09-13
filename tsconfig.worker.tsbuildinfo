@@ -1,1 +1,0 @@
-{"root":["./src/worker/env.d.ts","./src/worker/index.ts","./src/worker/room-do.ts","./src/shared/build.ts","./src/shared/code.ts","./src/shared/protocol.ts","./worker-configuration.d.ts"],"version":"5.9.3"}

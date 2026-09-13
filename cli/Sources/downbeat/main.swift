@@ -30,8 +30,9 @@ struct Options {
     var mute = true
     var playLocally = true
     var passphrase = ProcessInfo.processInfo.environment["DOWNBEAT_PASSPHRASE"] ?? ""
-    var baseURL = URL(string: ProcessInfo.processInfo.environment["DOWNBEAT_URL"]
-                      ?? "https://downbeat.lukaloehr.com")!
+    /// No built-in default: every deployment is self-hosted. Set by
+    /// `DOWNBEAT_URL` or `--url`, resolved in `requireServerURL`.
+    var baseURL: URL? = envServerURL()
     var offline = false
     var code: String?
     var takeover = false
@@ -108,7 +109,7 @@ func printHelp() {
       --code <ABC123>            fixed room code instead of random
       --takeover                 take over a room already hosted
       --passphrase <word>        pass it directly instead of the store
-      --url <https://...>        a different server
+      --url <https://...>        server URL (default: $DOWNBEAT_URL, required)
       --no-mute                  do NOT mute the source locally
       --no-local                 do not play on this Mac
       --offline                  local capture and playback only, no room
@@ -144,6 +145,28 @@ func die(_ message: String) -> Never {
     exit(1)
 }
 
+/// The server from `DOWNBEAT_URL`, if set to something that parses.
+func envServerURL() -> URL? {
+    guard let raw = ProcessInfo.processInfo.environment["DOWNBEAT_URL"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+          !raw.isEmpty,
+          let url = URL(string: raw), url.host != nil
+    else { return nil }
+    return url
+}
+
+func requireServerURL(_ url: URL?) -> URL {
+    guard let url else {
+        die("""
+            no server configured. Downbeat has no default server; point it at \
+            your own deployment:
+                export DOWNBEAT_URL=https://downbeat.example.com
+            or pass --url <https://...>.
+            """)
+    }
+    return url
+}
+
 // ------------------------------------------------------------------ commands
 
 if CommandLine.arguments.dropFirst().first == "selftest" {
@@ -151,11 +174,11 @@ if CommandLine.arguments.dropFirst().first == "selftest" {
 }
 
 func serverHost(from args: [String]) -> (URL, String) {
-    var url = URL(string: ProcessInfo.processInfo.environment["DOWNBEAT_URL"]
-                  ?? "https://downbeat.lukaloehr.com")!
+    var url = envServerURL()
     if let i = args.firstIndex(of: "--url"), i + 1 < args.count,
        let override = URL(string: args[i + 1]) { url = override }
-    return (url, url.host ?? "downbeat")
+    let resolved = requireServerURL(url)
+    return (resolved, resolved.host ?? "downbeat")
 }
 
 switch CommandLine.arguments.dropFirst().first {
@@ -187,7 +210,7 @@ default:
 }
 
 if CommandLine.arguments.dropFirst().first == "selftest-qr" {
-    let sample = "https://downbeat.lukaloehr.com/r/ABC123"
+    let sample = "https://downbeat.example.com/r/ABC123"
     guard let modules = TerminalQR.modules(for: sample) else {
         die("could not generate the QR")
     }
@@ -201,13 +224,17 @@ if CommandLine.arguments.dropFirst().first == "selftest-qr" {
 }
 
 let options = parseOptions()
+/// Only consulted when hosting a room; `--offline` needs no server.
+let serverURL: URL = options.offline
+    ? (options.baseURL ?? URL(string: "http://localhost")!)
+    : requireServerURL(options.baseURL)
 
 if options.pid == nil && options.sourceLabel != "System" {
     die("\(options.sourceLabel) is not running — start it and play something.")
 }
 var passphrase = options.passphrase
 if !options.offline && passphrase.isEmpty {
-    passphrase = Credentials.load(host: options.baseURL.host ?? "downbeat") ?? ""
+    passphrase = Credentials.load(host: serverURL.host ?? "downbeat") ?? ""
 }
 if !options.offline && passphrase.isEmpty {
     die("not logged in. Run `downbeat login` once.")
@@ -359,7 +386,7 @@ nonisolated(unsafe) var clampBuffer = [Float](repeating: 0, count: 16384)
 // ---- room ----------------------------------------------------------------
 
 if !options.offline {
-    let t = Transport(baseURL: options.baseURL, clock: clock)
+    let t = Transport(baseURL: serverURL, clock: clock)
     do {
         try t.createRoom(passphrase: passphrase, code: options.code,
                          takeover: options.takeover, sourceLabel: options.sourceLabel)
@@ -403,7 +430,7 @@ if !options.offline {
     // routinely exceeds full scale -- measured +6.7 dBFS with Music and
     // Spotify together. Opus handles out-of-range samples badly, so clamp
     // before anything downstream sees them. Peak scan and clamp are vDSP:
-    // vectorised, allocation-free, realtime-safe.
+    // vectorized, allocation-free, realtime-safe.
     let n = frames * 2
     var localPeak: Float = 0
     vDSP_maxmgv(samples, 1, &localPeak, vDSP_Length(n))
@@ -678,11 +705,11 @@ if Terminal.isInteractive {
 // ---- dashboard loop --------------------------------------------------------
 
 let qrModules: [[Bool]]? = transport.flatMap { t in
-    TerminalQR.modules(for: options.baseURL.appendingPathComponent("r")
+    TerminalQR.modules(for: serverURL.appendingPathComponent("r")
         .appendingPathComponent(t.code).absoluteString)
 }
 let joinHost: String = transport.map { t in
-    let u = options.baseURL.appendingPathComponent("r").appendingPathComponent(t.code)
+    let u = serverURL.appendingPathComponent("r").appendingPathComponent(t.code)
     return (u.host ?? "") + u.path
 } ?? "offline — this Mac only"
 
