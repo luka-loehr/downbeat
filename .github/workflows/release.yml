@@ -16,14 +16,18 @@ jobs:
 
       - name: Build downbeat (universal)
         working-directory: cli
-        run: swift build -c release --arch arm64 --arch x86_64
+        run: |
+          swift build -c release --arch arm64 --arch x86_64
+          # The products directory moved between Swift releases
+          # (.build/apple/... vs .build/out/...); ask instead of guessing.
+          echo "BIN_DIR=$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)" >> "$GITHUB_ENV"
 
       - name: Package
         run: |
           set -e
           PKG=downbeat-macos-universal
           mkdir -p "$PKG"
-          cp cli/.build/apple/Products/Release/downbeat "$PKG/downbeat"
+          cp "$BIN_DIR/downbeat" "$PKG/downbeat"
           cp README.md LICENSE CHANGELOG.md "$PKG/"
           cat > "$PKG/install.sh" <<'INNER'
           #!/bin/sh
@@ -34,7 +38,7 @@ jobs:
           mkdir -p "$PREFIX"
           install -m 755 "$HERE/downbeat" "$PREFIX/downbeat"
           rm -f "$PREFIX/downbeat-core"
-          echo "Installed $PREFIX/downbeat. Next: downbeat login, then downbeat host"
+          echo "Installed $PREFIX/downbeat. Next: export DOWNBEAT_URL=https://your-deployment.example.com, then downbeat login and downbeat host"
           INNER
           chmod 755 "$PKG/install.sh"
           tar -czf "$PKG.tar.gz" "$PKG"

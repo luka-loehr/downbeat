@@ -17,7 +17,7 @@ setvbuf(stdout, nil, _IOLBF, 0)
  this Mac is just one more speaker obeying the same rule.
  */
 
-let VERSION = "0.4.0"
+let VERSION = "0.5.0"
 
 struct Options {
     var pid: pid_t?          // nil = whole system

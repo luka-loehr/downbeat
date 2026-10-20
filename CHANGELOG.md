@@ -5,6 +5,11 @@ measurement was taken.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-10-20
+
+Self-hosted by default, lossless on request. The CLI no longer knows a
+server of its own: set `DOWNBEAT_URL` before `login`, `logout` or `host`.
+
 ### Added
 - **Lossless mode.** `downbeat host lossless` streams 24-bit FLAC, encoded by
   macOS's own FLAC encoder in 20 ms packets and decoded in the browser by
