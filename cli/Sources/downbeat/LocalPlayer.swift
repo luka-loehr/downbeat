@@ -108,6 +108,9 @@ final class LocalPlayer {
     private var reading = false
     /// Slewed copy of `timelineError`, so a measurement step never becomes a click.
     private var correctionMs: Double = 0
+    /// Output path latency, ms: device + safety offset + stream. The IO proc's
+    /// timestamp is when the buffer reaches the device, not when it is heard.
+    private var outputLatencyMs: Double = 0
 
     init(ring: RingBuffer, clock: RoomClock, sampleRate: Double, channels: Int, bufferMs: Double) {
         self.ring = ring
@@ -139,6 +142,32 @@ final class LocalPlayer {
         }
     }
 
+    /// Frames between the IO proc's timestamp and the speaker, in device frames.
+    private static func outputLatencyFrames(_ device: AudioObjectID) -> Double {
+        func u32(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector) -> UInt32 {
+            var addr = AudioObjectPropertyAddress(
+                mSelector: selector, mScope: kAudioObjectPropertyScopeOutput,
+                mElement: kAudioObjectPropertyElementMain)
+            var v: UInt32 = 0
+            var size = UInt32(MemoryLayout<UInt32>.size)
+            return AudioObjectGetPropertyData(object, &addr, 0, nil, &size, &v) == noErr ? v : 0
+        }
+        var total = Double(u32(device, kAudioDevicePropertyLatency))
+            + Double(u32(device, kAudioDevicePropertySafetyOffset))
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreams, mScope: kAudioObjectPropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        if AudioObjectGetPropertyDataSize(device, &addr, 0, nil, &size) == noErr, size > 0 {
+            var streams = [AudioStreamID](repeating: 0, count: Int(size) / MemoryLayout<AudioStreamID>.size)
+            if AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &streams) == noErr,
+               let first = streams.first {
+                total += Double(u32(first, kAudioStreamPropertyLatency))
+            }
+        }
+        return total
+    }
+
     func start() throws {
         var addr = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
@@ -148,6 +177,8 @@ final class LocalPlayer {
         let st = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
                                             &addr, 0, nil, &size, &deviceID)
         guard st == noErr, deviceID != kAudioObjectUnknown else { throw PlayerError.noDefaultOutput(st) }
+
+        outputLatencyMs = Self.outputLatencyFrames(deviceID) / sampleRate * 1000
 
         let rate = sampleRate
         let chans = channels
@@ -172,7 +203,8 @@ final class LocalPlayer {
             // sides, so the room-clock offset cancels out entirely.
             let anchorMs = Double(bitPattern: self.anchorBits.load(ordering: .relaxed))
             let outLocalMs = RoomClock.localMs(hostTime: inOutputTime.pointee.mHostTime)
-            let want = (outLocalMs - self.bufferMs - anchorMs - self.correctionMs) / 1000 * rate
+            let heardLocalMs = outLocalMs + self.outputLatencyMs
+            let want = (heardLocalMs - self.bufferMs - anchorMs - self.correctionMs) / 1000 * rate
 
             if !self.reading {
                 self.readPos = want

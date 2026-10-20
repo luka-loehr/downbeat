@@ -644,9 +644,9 @@ let currentLabel = TextBox(options.sourceLabel)
     // Pad the silence of the swap so stream position keeps tracking the clock.
     if anchoredFlag.load(ordering: .acquiring) {
         let expected = Int64((RoomClock.localMs(hostTime: mach_absolute_time())
-                              - anchorLocalMs) / 1000 * 48000)
+                              - anchorLocalMs) / 1000 * rate)
         let behind = expected - ring.framesWritten
-        if behind > 0 { ring.writeSilence(frames: Int(min(behind, 48000 * 4))) }
+        if behind > 0 { ring.writeSilence(frames: Int(min(behind, Int64(rate * 4)))) }
     }
 
     do {

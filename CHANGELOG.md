@@ -39,6 +39,15 @@ measurement was taken.
   speaker; the music itself stays on the AudioContext, so latency and
   calibration are unchanged. Confirmed on one Android phone: it stayed in the
   room with a ~300 ms cushion and flat underruns while in another app.
+- **The host Mac played early by its own output latency.** The local player
+  picked samples for the time a buffer reaches the output device, not the time
+  it is heard. It now adds the device latency, safety offset and stream
+  latency of the default output device, read once at start, the way phones
+  already add their `outputLatency`. A few ms to ~20 ms on built-in speakers,
+  far more on Bluetooth, AirPlay or HDMI. Builds and passes the capture-free
+  self tests; not yet measured by ear against a phone.
+- A source switch padded its silence at a hard-coded 48 kHz; it now uses the
+  capture rate.
 - Packets are labeled by the encoder's OUTPUT position. The FLAC encoder
   returns each packet one call late, which with input-position labels would
   have played every phone 20 ms behind the host Mac.
