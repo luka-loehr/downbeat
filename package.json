@@ -29,7 +29,7 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^5.9.2",
     "vite": "^8.2.2",
-    "vitest": "^4.1.11",
+    "vitest": "^4.1.12",
     "wrangler": "^4.151.3"
   },
   "allowScripts": {
