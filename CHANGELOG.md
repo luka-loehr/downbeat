@@ -5,6 +5,28 @@ measurement was taken.
 
 ## [Unreleased]
 
+### Security
+- **Everything a client sends is validated before it is stored or relayed**
+  (`src/shared/validate.ts`). Telemetry fields must be finite numbers: a
+  listener could previously put arbitrary JSON into its report, which was
+  broadcast to the whole room and could overflow the socket attachment.
+  Host commands are checked field by field (`play` with an index outside the
+  queue no longer replaces the current track; queue entries must carry an
+  upload id), `liveStart` must describe a possible stream, and device names,
+  titles and source labels lose control characters.
+- **Body limits are enforced while reading.** `/api/rooms` and
+  `/api/rooms/end` accept a JSON object of at most 4 kB (a `null` or
+  non-string body used to answer 500); uploads stop at 25 MB even without a
+  `Content-Length`; socket text frames over 64 kB and audio frames over
+  256 kB are dropped.
+- **Errors no longer echo exception messages.** A failure answers
+  `500 {"error":"internal error"}` and the cause goes to the Worker log.
+
+### Changed
+- Known paths with the wrong method answer `405` with `Allow`; `/api/ws`
+  without a WebSocket upgrade answers `426` in the Worker, without waking
+  the room's Durable Object. `X-Track-Duration` must be plain seconds.
+
 ## [0.5.0] — 2026-10-20
 
 Self-hosted by default, lossless on request. The CLI no longer knows a

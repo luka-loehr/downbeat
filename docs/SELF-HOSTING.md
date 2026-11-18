@@ -91,7 +91,7 @@ Cloudflare request count, and cost, is the same as Opus.
 cp wrangler.example.jsonc wrangler.jsonc   # if you have not already
 npx wrangler types
 npm run typecheck                          # worker + web
-npm test                                   # clock estimator, drift controller, room codes
+npm test                                   # clock, drift controller, FLAC decode, input validation
 npm run build
 cd cli && swift build -c release
 ./.build/release/downbeat selftest         # Opus encoder against live capture

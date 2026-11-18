@@ -3,6 +3,15 @@ import { generateCode, isValidCode, normalizeCode } from "../shared/code";
 import { BUILD_ID } from "../shared/build";
 import { CODE_ALPHABET, CODE_LENGTH } from "../shared/protocol";
 import type { Track } from "../shared/protocol";
+import {
+  BodyTooLarge,
+  MAX_LABEL_CHARS,
+  MAX_TITLE_CHARS,
+  cleanText,
+  parseDuration,
+  readCapped,
+  readJsonObject,
+} from "../shared/validate";
 
 export { RoomDO };
 
@@ -51,6 +60,10 @@ export default {
       }
 
       if (pathname === "/api/ws") {
+        // Checked here so a plain GET never wakes the room's Durable Object.
+        if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+          return json({ error: "expected websocket" }, 426);
+        }
         return await joinRoom(request, env);
       }
 
@@ -59,15 +72,27 @@ export default {
       }
 
       if (pathname.startsWith("/audio/")) {
+        if (request.method !== "GET" && request.method !== "HEAD") {
+          return new Response("method not allowed", { status: 405, headers: { allow: "GET, HEAD" } });
+        }
         return await serveAudio(request, env, ctx, pathname.slice("/audio/".length));
+      }
+
+      if (pathname === "/api/rooms" || pathname === "/api/rooms/end" || pathname === "/api/upload") {
+        return new Response(JSON.stringify({ error: "method not allowed" }), {
+          status: 405,
+          headers: { "content-type": "application/json; charset=utf-8", allow: "POST" },
+        });
       }
 
       if (pathname.startsWith("/api/")) {
         return json({ error: "not found" }, 404);
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : "unexpected error";
-      return json({ error: message }, 500);
+      // The cause goes to the log, not to the caller: an exception message
+      // can name tables, bindings or keys.
+      console.error(JSON.stringify({ event: "error", path: pathname, message: err instanceof Error ? err.message : String(err) }));
+      return json({ error: "internal error" }, 500);
     }
 
     // Cross-origin isolation, so pages can use SharedArrayBuffer: live audio
@@ -122,18 +147,14 @@ async function sweep(env: Env): Promise<void> {
 /* ------------------------------------------------------------------ rooms */
 
 async function createRoom(request: Request, env: Env): Promise<Response> {
-  const body = (await request.json().catch(() => ({}))) as {
-    passphrase?: string;
-    code?: string;
-    takeover?: boolean;
-    sourceLabel?: string;
-  };
+  const body = await readJsonObject(request);
+  if (!body) return json({ error: "body must be a small JSON object" }, 400);
   const expected = env.HOST_PASSPHRASE;
 
   if (!expected) {
     return json({ error: "server not configured: HOST_PASSPHRASE unset" }, 503);
   }
-  if (!body.passphrase || !timingSafeEqual(body.passphrase, expected)) {
+  if (typeof body.passphrase !== "string" || !body.passphrase || !timingSafeEqual(body.passphrase, expected)) {
     return json({ error: "wrong passphrase" }, 401);
   }
 
@@ -141,8 +162,8 @@ async function createRoom(request: Request, env: Env): Promise<Response> {
   // for reclaiming the same room after a restart. Safe because getting this far
   // already required the passphrase.
   let code: string;
-  if (body.code) {
-    code = normalizeCode(body.code);
+  if (body.code !== undefined && body.code !== null && body.code !== "") {
+    code = typeof body.code === "string" ? normalizeCode(body.code.slice(0, 64)) : "";
     if (!isValidCode(code)) {
       return json({ error: `bad code: ${CODE_LENGTH} chars from ${CODE_ALPHABET}` }, 400);
     }
@@ -160,7 +181,7 @@ async function createRoom(request: Request, env: Env): Promise<Response> {
     .bind(code, now)
     .first<{ created_at: number; source_label: string | null }>();
 
-  if (existing && !body.takeover) {
+  if (existing && body.takeover !== true) {
     return json(
       {
         error: "room already hosted",
@@ -183,7 +204,7 @@ async function createRoom(request: Request, env: Env): Promise<Response> {
        token_hash = ?2, created_at = ?3, expires_at = ?4, last_seen_at = ?3,
        source_label = ?5, revoked = 0`,
   )
-    .bind(code, await sha256Hex(hostToken), now, expiresAt, body.sourceLabel ?? null)
+    .bind(code, await sha256Hex(hostToken), now, expiresAt, cleanText(body.sourceLabel, MAX_LABEL_CHARS) || null)
     .run();
 
   return json({ code, hostToken, expiresAt, tookOver: !!existing });
@@ -191,13 +212,11 @@ async function createRoom(request: Request, env: Env): Promise<Response> {
 
 /** A host giving the room back, so the code is immediately reusable. */
 async function endRoom(request: Request, env: Env): Promise<Response> {
-  const body = (await request.json().catch(() => ({}))) as {
-    code?: string;
-    hostToken?: string;
-  };
-  const code = normalizeCode(body.code ?? "");
+  const body = await readJsonObject(request);
+  if (!body) return json({ error: "body must be a small JSON object" }, 400);
+  const code = typeof body.code === "string" ? normalizeCode(body.code.slice(0, 64)) : "";
   if (!isValidCode(code)) return json({ error: "bad room code" }, 400);
-  if (!(await verifyHostToken(body.hostToken ?? "", code, env))) {
+  if (typeof body.hostToken !== "string" || !(await verifyHostToken(body.hostToken, code, env))) {
     return json({ error: "not the host" }, 401);
   }
   await env.DB.prepare("UPDATE sessions SET revoked = 1 WHERE code = ?1").bind(code).run();
@@ -206,7 +225,7 @@ async function endRoom(request: Request, env: Env): Promise<Response> {
 
 async function joinRoom(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  const code = normalizeCode(url.searchParams.get("code") ?? "");
+  const code = normalizeCode((url.searchParams.get("code") ?? "").slice(0, 64));
 
   if (!isValidCode(code)) return json({ error: "bad room code" }, 400);
 
@@ -231,25 +250,28 @@ async function joinRoom(request: Request, env: Env): Promise<Response> {
 
 async function upload(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  const code = normalizeCode(url.searchParams.get("code") ?? "");
+  const code = normalizeCode((url.searchParams.get("code") ?? "").slice(0, 64));
   const token = url.searchParams.get("hostToken") ?? "";
 
   if (!isValidCode(code)) return json({ error: "bad room code" }, 400);
   if (!(await verifyHostToken(token, code, env))) return json({ error: "not the host" }, 401);
 
-  const type = (request.headers.get("Content-Type") ?? "").split(";")[0].trim();
-  if (!ALLOWED_AUDIO.has(type)) return json({ error: `unsupported type: ${type}` }, 415);
-
-  const declared = Number(request.headers.get("Content-Length") ?? "0");
-  if (declared > MAX_UPLOAD_BYTES) {
-    return json({ error: `too large (max ${MAX_UPLOAD_BYTES} bytes)` }, 413);
+  const type = (request.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase();
+  if (!ALLOWED_AUDIO.has(type)) {
+    return json({ error: `unsupported type: ${cleanText(type, 64)}` }, 415);
   }
 
-  const bytes = new Uint8Array(await request.arrayBuffer());
+  // Stops reading at the limit, also when no Content-Length was sent.
+  let bytes: Uint8Array;
+  try {
+    bytes = await readCapped(request, MAX_UPLOAD_BYTES);
+  } catch (err) {
+    if (err instanceof BodyTooLarge) {
+      return json({ error: `too large (max ${MAX_UPLOAD_BYTES} bytes)` }, 413);
+    }
+    throw err;
+  }
   if (!bytes.byteLength) return json({ error: "empty body" }, 400);
-  if (bytes.byteLength > MAX_UPLOAD_BYTES) {
-    return json({ error: `too large (max ${MAX_UPLOAD_BYTES} bytes)` }, 413);
-  }
 
   // Content-addressed: re-uploading the same song across rooms costs nothing.
   const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -270,11 +292,11 @@ async function upload(request: Request, env: Env): Promise<Response> {
     .bind(id, code, bytes.byteLength, Date.now())
     .run();
 
-  const title = decodeTitle(request.headers.get("X-Track-Title")).slice(0, 120);
+  const title = cleanText(decodeTitle(request.headers.get("X-Track-Title")), MAX_TITLE_CHARS) || "Untitled";
   const track: Track = {
     id,
     title,
-    duration: Number(request.headers.get("X-Track-Duration") ?? "0") || 0,
+    duration: parseDuration(request.headers.get("X-Track-Duration")),
     size: bytes.byteLength,
     mimeType: type,
   };

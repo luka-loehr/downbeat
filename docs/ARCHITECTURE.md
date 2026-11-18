@@ -63,12 +63,46 @@ moment.
 | --- | --- |
 | `src/worker/index.ts` | Router, sessions, host tokens, R2 range serving, cron sweep |
 | `src/worker/room-do.ts` | Durable Object: WebSocket hub, time server, arm barrier, live relay |
+| `src/shared/validate.ts` | Shape and size checks for every request body, header and socket message |
 | `src/audio/clock.ts` | Room clock: Cristian's algorithm, min-RTT filtering, slew |
 | `src/audio/engine.ts` | Decode-ahead playback, drift control, live player |
 | `src/audio/room.ts` | Connection, reconnect, state reconciliation |
 | `public/live-processor.js` | AudioWorklet reading the shared-memory ring |
 | `cli/Sources/downbeat/` | Host binary: tap, Opus, transport, local playback, dashboard, QR |
 | `migrations/` | D1 schema |
+
+## HTTP API and limits
+
+| Request | Auth | Answers |
+| --- | --- | --- |
+| `GET /api/health` | none | `{ ok, service, build }` |
+| `POST /api/rooms` `{ passphrase, code?, takeover?, sourceLabel? }` | passphrase | `{ code, hostToken, expiresAt, tookOver }`; `401` wrong passphrase, `409` room already hosted (retry with `takeover: true`), `503` no `HOST_PASSPHRASE` secret |
+| `POST /api/rooms/end` `{ code, hostToken }` | host token | `{ ok }`; frees the code at once |
+| `GET /api/ws?code=&name=&role=&hostToken=` | none to listen, host token for `host` / `source` | WebSocket; `426` without an upgrade, `400` bad code |
+| `POST /api/upload?code=&hostToken=` | host token | `{ track }`; `415` not an audio type, `413` over 25 MB, `400` empty |
+| `GET`/`HEAD /audio/<id>` | none (ids are 128 bits of a SHA-256) | the file, with range support and edge caching |
+
+Known paths with the wrong method answer `405`, unknown `/api/*` paths `404`.
+A failure inside the Worker answers `500 {"error":"internal error"}`; the
+cause is logged, not returned.
+
+A host token is `code.expiry.HMAC`, valid for 24 hours, and only while it is
+the session on record in D1: ending the room or a takeover invalidates it.
+
+Everything a client sends is checked in `src/shared/validate.ts` before it is
+stored or relayed:
+
+| What | Limit |
+| --- | --- |
+| JSON body of `/api/rooms`, `/api/rooms/end` | 4 kB, must be an object |
+| Upload | 25 MB, enforced while reading, also without `Content-Length` |
+| Track title / source label / device name | 120 / 80 / 24 characters, control characters removed |
+| Track duration, seek target | 0 to 86,400 s |
+| Queue | 200 tracks, ids must be upload ids (32 hex digits) |
+| Socket text frame | 64 kB; anything that is not a JSON object is ignored |
+| Live audio frame | 256 kB, accepted from the verified source socket only |
+| Telemetry | finite numbers only; other values count as not reported |
+| Host commands | checked field by field; a malformed one is answered with a non-fatal `error` |
 
 ## How the synchronization works
 

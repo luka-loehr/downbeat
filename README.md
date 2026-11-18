@@ -38,7 +38,7 @@ Deploy the server first, see [Self-hosting](docs/SELF-HOSTING.md).
 ## Documentation
 
 - [Self-hosting](docs/SELF-HOSTING.md) – deploy the Worker, configure the CLI, hosting options, development
-- [Architecture](docs/ARCHITECTURE.md) – system design, clock synchronization, measurements, design choices
+- [Architecture](docs/ARCHITECTURE.md) – system design, HTTP API and limits, clock synchronization, measurements, design choices
 - [Changelog](CHANGELOG.md)
 
 ---

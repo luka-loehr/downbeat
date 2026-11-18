@@ -10,6 +10,17 @@ import type {
   Track,
 } from "../shared/protocol";
 import { MIN_LEAD_MS, MAX_LEAD_MS, PROTOCOL_VERSION } from "../shared/protocol";
+import {
+  MAX_AUDIO_FRAME_BYTES,
+  MAX_NAME_CHARS,
+  MAX_QUEUE,
+  MAX_TEXT_FRAME_CHARS,
+  cleanText,
+  isObject,
+  isTrackId,
+  sanitizeCommand,
+  sanitizeTelemetry,
+} from "../shared/validate";
 
 interface Persisted {
   code: string;
@@ -90,7 +101,7 @@ export class RoomDO implements DurableObject {
     const raw = url.searchParams.get("role");
     const role: Role = raw === "host" || raw === "source" ? raw : "listener";
     const name = this.uniqueName(
-      (url.searchParams.get("name") ?? "").slice(0, 24) || defaultName(role),
+      cleanText(url.searchParams.get("name"), MAX_NAME_CHARS) || defaultName(role),
     );
 
     const pair = new WebSocketPair();
@@ -153,6 +164,7 @@ export class RoomDO implements DurableObject {
       // accept time, after the Worker checked the host token -- without this,
       // any listener could stream into the room.
       if (!this.ctx.getTags(ws).includes("tx")) return;
+      if (raw.byteLength > MAX_AUDIO_FRAME_BYTES) return;
       for (const peer of this.ctx.getWebSockets("rx")) {
         try {
           peer.send(raw);
@@ -162,15 +174,20 @@ export class RoomDO implements DurableObject {
       }
       return;
     }
+    if (raw.length > MAX_TEXT_FRAME_CHARS) return;
     let msg: ClientMessage;
     try {
-      msg = JSON.parse(raw) as ClientMessage;
+      const parsed: unknown = JSON.parse(raw);
+      // `null`, numbers and arrays are valid JSON but not messages.
+      if (!isObject(parsed)) return;
+      msg = parsed as ClientMessage;
     } catch {
       return;
     }
 
     // Time probes are the hot path: answer and return before touching state.
     if (msg.t === "ping") {
+      if (typeof msg.t0 !== "number" || !Number.isFinite(msg.t0)) return;
       this.send(ws, { t: "pong", t0: msg.t0, t1 });
       return;
     }
@@ -180,21 +197,16 @@ export class RoomDO implements DurableObject {
 
     switch (msg.t) {
       case "telemetry":
-        a.rtt = msg.rtt;
-        a.sync = msg.sync;
-        a.startError = msg.startError;
-        a.playoutMs = msg.playoutMs ?? null;
-        a.marginMs = msg.marginMs ?? null;
-        a.cushionMs = msg.cushionMs ?? null;
-        a.underruns = msg.underruns ?? null;
-        a.ctxRate = msg.ctxRate ?? null;
-        a.stuck = msg.stuck ?? false;
+        // Every field ends up in the socket attachment (2 kB at most) and in
+        // each state broadcast, so only finite numbers and one boolean pass.
+        Object.assign(a, sanitizeTelemetry(msg));
         ws.serializeAttachment(a);
         this.broadcastStateSoon();
         return;
 
       case "ready":
         if (msg.seq !== this.p.seq) return; // stale arm, ignore
+        if (!isTrackId(msg.trackId)) return;
         a.readyFor = msg.trackId;
         ws.serializeAttachment(a);
         this.broadcastStateSoon();
@@ -206,7 +218,14 @@ export class RoomDO implements DurableObject {
           this.send(ws, { t: "error", message: "not the host", fatal: false });
           return;
         }
-        await this.command(msg.cmd, t1);
+        {
+          const cmd = sanitizeCommand(msg.cmd);
+          if (!cmd) {
+            this.send(ws, { t: "error", message: "malformed command", fatal: false });
+            return;
+          }
+          await this.command(cmd, t1);
+        }
         return;
 
       default:
@@ -250,7 +269,7 @@ export class RoomDO implements DurableObject {
   private async command(cmd: HostCommand, now: number): Promise<void> {
     switch (cmd.c) {
       case "addTracks":
-        this.p.queue = [...this.p.queue, ...cmd.tracks].slice(0, 200);
+        this.p.queue = [...this.p.queue, ...cmd.tracks].slice(0, MAX_QUEUE);
         if (this.p.current < 0 && this.p.queue.length) this.p.current = 0;
         break;
 
@@ -264,7 +283,11 @@ export class RoomDO implements DurableObject {
       }
 
       case "play":
-        if (typeof cmd.index === "number") this.p.current = cmd.index;
+        if (typeof cmd.index === "number") {
+          // An index outside the queue must not replace a valid `current`.
+          if (!this.p.queue[cmd.index]) return;
+          this.p.current = cmd.index;
+        }
         if (this.p.current < 0 || !this.p.queue[this.p.current]) return;
         this.p.offsetInTrack = cmd.offsetInTrack ?? this.p.offsetInTrack;
         await this.beginArming(now);
